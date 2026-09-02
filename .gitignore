@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .review-voice-data/
+.lupp/
 .code-review-voice/
 .env
 .env.*
@@ -14,4 +15,5 @@ dist/
 coverage/
 release/
 *.zip
+*.tgz
 .DS_Store

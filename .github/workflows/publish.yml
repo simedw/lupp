@@ -1,0 +1,43 @@
+name: Publish npm
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'simedw/lupp' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Verify release tag
+        run: node --input-type=module -e 'import p from "./package.json" with { type:"json" }; if (process.env.GITHUB_REF_NAME !== `v${p.version}`) throw new Error("Tag must match package version");'
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm pack --pack-destination /tmp
+      - name: Smoke-test packaged command
+        run: |
+          VERSION=$(node -p 'require("./package.json").version')
+          npm install --prefix /tmp/lupp-smoke --omit=dev "/tmp/lupp-$VERSION.tgz"
+          cd /tmp
+          test "$(/tmp/lupp-smoke/node_modules/.bin/lupp --version)" = "Lupp $VERSION"
+          /tmp/lupp-smoke/node_modules/.bin/lupp --help
+      - name: Publish with npm trusted publishing
+        run: |
+          VERSION=$(node -p 'require("./package.json").version')
+          npm publish "/tmp/lupp-$VERSION.tgz" --access public

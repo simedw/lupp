@@ -1,19 +1,16 @@
 # Lupp
 
-Read code. Think out loud. Lupp turns your spoken thoughts into review notes and asks Codex or Claude to investigate them.
+Review your code with your voice. Lupp pairs your questions with the code you’re looking at and asks Codex or Claude to investigate.
 
 ## Install
 
-You'll need Node.js 22.12+, Git, and a logged-in Codex or Claude Code installation. The local launcher supports macOS and Linux.
+You'll need Node.js 22.12+, Git, and a logged-in Codex or Claude Code installation. Supports macOS and Linux.
 
 ```sh
-git clone https://github.com/simedw/lupp.git
-cd lupp
-npm install
-npm run install:local
+npm install -g lupp
 ```
 
-Make sure `~/.local/bin` is on your PATH. Then, from a checkout you want to review:
+Then, from a checkout you want to review:
 
 ```sh
 cd /path/to/your/repo
@@ -22,8 +19,12 @@ lupp
 
 Open **SET**, choose Codex or Claude, and add an OpenAI API key for transcription. Start a review and talk as you read your branch's diff. Mute whenever you like.
 
-Notes stay in `.code-review-voice/` inside the reviewed repo; keep that folder out of Git. Recordings stay on your computer, but audio is sent to OpenAI for transcription, and the selected agent receives your notes and relevant code.
+Use **⌘K** (Ctrl+K on Linux) to find changed files or search code in the displayed diff. Arrow keys navigate; Enter opens a match.
 
-To update, run `git pull && npm install && npm run install:local` in this checkout. Keep the checkout in place—the launcher uses it.
+Notes stay in `.lupp/` inside the reviewed repo; keep that folder out of Git. Recordings stay on your computer, but audio is sent to OpenAI for transcription, and the selected agent receives your notes and relevant code.
 
-For development: `npm start`. Checks: `npm run check && npm test`.
+To update: `npm install -g lupp@latest`.
+
+For development: clone this repo, run `npm install`, then `npm start`. Checks: `npm run check && npm test`.
+
+MIT licensed. Dependencies and model providers have their own licenses and terms.

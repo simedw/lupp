@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { inspectRepository, loadRepositoryDiff } from "../desktop/git.js";
-import { collapseAttention, encodeMonoWav, parseUnifiedDiff, safeSegmentId } from "../desktop/lib.js";
+import { collapseAttention, encodeMonoWav, parseUnifiedDiff, safeSegmentId, summarizeDiff } from "../desktop/lib.js";
 import { resolveCodexExecutable } from "../desktop/codex-path.js";
 import { loadReview, reviewFilePath, saveReview } from "../desktop/review-store.js";
 import { tokenizeLine } from "../desktop/highlight.js";
@@ -46,7 +46,7 @@ test("review observations persist in a branch-specific dot folder", async () => 
   const metadata = { repository, branch: "feature/voice desk", baseRef: "main", baseSha: "abc", headSha: "def" };
   const observations = [{ id: "n1", transcript: "Check this branch", spans: [] }];
   const saved = await saveReview(metadata, observations);
-  assert.match(saved.file, /\.code-review-voice\/reviews\/feature-voice-desk-[a-f0-9]{8}\.json$/);
+  assert.match(saved.file, /\.lupp\/reviews\/feature-voice-desk-[a-f0-9]{8}\.json$/);
   assert.equal(reviewFilePath(metadata), saved.file);
   assert.deepEqual((await loadReview(metadata)).observations, observations);
 });
@@ -84,6 +84,16 @@ index 111..222 100644
   assert.deepEqual(files[0].hunks[0].lines.map((line) => [line.type, line.oldLine, line.newLine]), [
     ["context", 2, 2], ["delete", 3, null], ["add", null, 3], ["add", null, 4]
   ]);
+});
+
+test("diff totals include all files and handle an empty diff", () => {
+  assert.deepEqual(summarizeDiff([]), { additions: 0, deletions: 0 });
+  assert.deepEqual(summarizeDiff([
+    { additions: 1250, deletions: 3 },
+    { additions: 0, deletions: 420 },
+    { additions: 12, deletions: 0 },
+    { additions: 0, deletions: 0 }
+  ]), { additions: 1262, deletions: 423 });
 });
 
 test("attention samples collapse into ordered code spans", () => {

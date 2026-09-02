@@ -1,4 +1,5 @@
 import type { SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
+import { readFileSync } from "node:fs";
 import {
   findingSchema,
   parseFinding,
@@ -11,6 +12,8 @@ import {
 } from "./types.js";
 
 type ClaudeAdapterOptions = { apiKey?: string };
+const { version } = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8"));
+const clientApp = `lupp/${version}`;
 
 export class ClaudeAdapter implements AgentAdapter {
   readonly id = "claude" as const;
@@ -43,8 +46,8 @@ class ClaudeSession implements AgentSession {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     let result: SDKResultMessage | null = null;
     const env = this.apiKey
-      ? { ...process.env, ANTHROPIC_API_KEY: this.apiKey, CLAUDE_AGENT_SDK_CLIENT_APP: "lupp/0.5.1" }
-      : { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: "lupp/0.5.1" };
+      ? { ...process.env, ANTHROPIC_API_KEY: this.apiKey, CLAUDE_AGENT_SDK_CLIENT_APP: clientApp }
+      : { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: clientApp };
 
     for await (const message of query({
       prompt: reviewPrompt(observation),

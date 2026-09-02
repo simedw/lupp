@@ -1,26 +1,44 @@
 {
   "name": "lupp",
-  "version": "0.5.1",
-  "private": true,
+  "version": "0.1.0",
   "type": "module",
-  "description": "A local voice-first code review desk with pluggable coding agents",
+  "description": "Review your code with your voice. Lupp pairs your questions with the code you’re looking at and asks Codex or Claude to investigate.",
+  "license": "MIT",
+  "author": "Simon Edwardsson",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/simedw/lupp.git"
+  },
+  "homepage": "https://github.com/simedw/lupp#readme",
+  "bugs": "https://github.com/simedw/lupp/issues",
+  "bin": { "lupp": "dist/scripts/cli.js" },
+  "files": [
+    "dist/desktop/**/*.js",
+    "dist/desktop/**/*.cjs",
+    "dist/scripts/cli.js",
+    "desktop/index.html",
+    "desktop/styles.css"
+  ],
+  "os": ["darwin", "linux"],
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
   "scripts": {
     "install:local": "npm run build && node dist/scripts/install-local.js",
     "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "start": "npm run build && electron dist/desktop/main.js",
     "test": "npm run build && node --test dist/test/*.test.js",
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.257",
-    "@openai/codex-sdk": "^0.87.0"
+    "@openai/codex-sdk": "^0.87.0",
+    "electron": "^44.1.0"
   },
   "engines": {
     "node": ">=22.12.0"
   },
   "devDependencies": {
     "@types/node": "^26.4.0",
-    "electron": "^44.1.0",
     "typescript": "^7.0.2"
   }
 }

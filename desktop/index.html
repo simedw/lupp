@@ -12,7 +12,12 @@
   <main class="app-shell">
     <header class="workbar">
       <button id="open-repo" class="repo-button"><span class="repo-mark">⌁</span><span><b id="repo-name">Open a checkout</b><small id="repo-meta">Choose a local Git repository</small></span></button>
-      <div class="session-identity"><span>BASE</span><b id="base-ref">—</b><i>→</i><span>HEAD</span><b id="head-ref">—</b></div>
+      <div class="session-identity">
+        <span>BASE</span><b id="base-ref">—</b><i>→</i><span>HEAD</span><b id="head-ref">—</b>
+        <div id="repo-tally" class="file-tally repository-tally hidden" role="group" aria-label="Total changes" title="Total lines added and deleted across the reviewed diff">
+          <span class="tally-label" aria-hidden="true">TOTAL</span><span id="repo-additions" class="tally-added" aria-hidden="true">+0</span><span id="repo-deletions" class="tally-deleted" aria-hidden="true">−0</span>
+        </div>
+      </div>
       <div class="transport">
         <button id="settings" class="icon-button" title="Agent and transcription settings">SET</button>
         <button id="mute" class="mute-button" disabled><span class="mic-glyph">●</span><span>MUTED</span></button>
@@ -29,11 +34,12 @@
     <section id="workspace" class="workspace hidden">
       <nav class="file-rail">
         <header><span>CHANGED FILES</span><b id="file-count">0</b></header>
+        <button id="file-search" class="file-search-trigger" disabled><span>Find file or code</span><kbd>⌘ K</kbd></button>
         <div id="file-list" class="file-list"></div>
       </nav>
       <section class="proof-stage">
         <header class="file-heading"><div><span id="file-status">MODIFIED</span><h2 id="file-name">—</h2></div><div class="file-tally"><ins id="file-additions">+0</ins><del id="file-deletions">−0</del></div></header>
-        <div id="diff-scroll" class="diff-scroll"><div id="diff" class="diff"></div></div>
+        <div id="diff-scroll" class="diff-scroll" tabindex="-1"><div id="diff" class="diff"></div></div>
         <footer class="attention-strip"><span class="live-dot"></span><b id="attention-label">Session idle</b><div id="level-meter" class="level-meter"><i></i></div><span id="attention-location">No active line</span></footer>
       </section>
       <aside class="voice-ledger">
@@ -42,6 +48,14 @@
       </aside>
     </section>
   </main>
+
+  <dialog id="search-dialog" class="search-dialog" aria-label="Find a file or code">
+    <div class="search-heading"><label for="search-input">FIND IN REVIEW</label><button class="search-close" type="button" aria-label="Close search">Esc</button></div>
+    <input id="search-input" type="search" placeholder="File name or a line of code…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list">
+    <div class="search-scope">Changed files and displayed diff contents</div>
+    <div id="search-results" class="search-results" role="listbox" aria-label="Search results"></div>
+    <footer class="search-footer"><span id="search-status" role="status" aria-live="polite"></span><span>↑ ↓ navigate · ↵ open</span></footer>
+  </dialog>
 
   <div id="settings-modal" class="modal hidden">
     <form id="settings-form" class="settings-card">

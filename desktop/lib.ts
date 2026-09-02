@@ -1,6 +1,13 @@
 import type { AttentionSample, DiffFile, DiffHunk } from "./types.js";
 import type { AttentionSpan } from "./agents/types.js";
 
+export function summarizeDiff(files: ReadonlyArray<Pick<DiffFile, "additions" | "deletions">>) {
+  return files.reduce((total, file) => ({
+    additions: total.additions + file.additions,
+    deletions: total.deletions + file.deletions
+  }), { additions: 0, deletions: 0 });
+}
+
 export function parseUnifiedDiff(source: string): DiffFile[] {
   const files: DiffFile[] = [];
   let file: DiffFile | null = null;

@@ -14,7 +14,7 @@ function branchFileName(branch: string) {
 
 export function reviewFilePath(metadata: ReviewMetadata) {
   if (!path.isAbsolute(metadata?.repository || "")) throw new Error("A repository path is required");
-  return path.join(metadata.repository, ".code-review-voice", "reviews", branchFileName(metadata.branch));
+  return path.join(metadata.repository, ".lupp", "reviews", branchFileName(metadata.branch));
 }
 
 export async function loadReview(metadata: ReviewMetadata): Promise<{ observations: ReviewObservation[]; file: string }> {

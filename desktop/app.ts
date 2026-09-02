@@ -1,8 +1,11 @@
-import { collapseAttention, encodeMonoWav } from "./lib.js";
+import { collapseAttention, encodeMonoWav, summarizeDiff } from "./lib.js";
 import { tokenizeLine } from "./highlight.js";
 import { VoiceCapture, type SpeechSegment } from "./voice-capture.js";
 import { createObservationList } from "./observation-list.js";
 import { errorMessage } from "./errors.js";
+import { SearchPalette } from "./search-palette.js";
+import type { SearchResult } from "./search.js";
+import { FileTreeView } from "./file-tree-view.js";
 import type { AttentionSample, DiffFile, Repository, Settings } from "./types.js";
 import type { AgentProviderId, AgentUsage, Finding, ReviewObservation } from "./agents/types.js";
 
@@ -45,6 +48,9 @@ type Controls = {
   "#agent-provider": HTMLSelectElement;
   "#api-key": HTMLInputElement;
   "#anthropic-api-key": HTMLInputElement;
+  "#file-search": HTMLButtonElement;
+  "#search-dialog": HTMLDialogElement;
+  "#search-input": HTMLInputElement;
 };
 function $<K extends keyof Controls>(selector: K): Controls[K];
 function $(selector: string): HTMLElement;
@@ -105,6 +111,8 @@ async function openRepository() {
 
 function applyRepository(repository: Repository) {
   state.repository = repository;
+  searchPalette.setFiles(repository.files);
+  fileTree.setFiles(repository.files);
   state.activeFile = repository.files[0] || null;
   state.observations = (repository.review?.observations || []).map((observation) => {
     if (["transcribing", "queued", "investigating"].includes(observation.status || "")) {
@@ -118,6 +126,13 @@ function applyRepository(repository: Repository) {
   $("#repo-meta").textContent = repository.repository;
   $("#base-ref").textContent = repository.baseRef;
   $("#head-ref").textContent = repository.branch;
+  const totals = summarizeDiff(repository.files);
+  const additions = totals.additions.toLocaleString("en");
+  const deletions = totals.deletions.toLocaleString("en");
+  $("#repo-additions").textContent = `+${additions}`;
+  $("#repo-deletions").textContent = `−${deletions}`;
+  $("#repo-tally").setAttribute("aria-label", `Total changes: ${additions} lines added, ${deletions} lines deleted`);
+  $("#repo-tally").classList.remove("hidden");
   $("#file-count").textContent = String(repository.files.length);
   $("#empty-state").classList.add("hidden");
   $("#workspace").classList.remove("hidden");
@@ -130,16 +145,7 @@ function applyRepository(repository: Repository) {
 }
 
 function renderFiles() {
-  const list = $("#file-list");
-  list.replaceChildren();
-  for (const file of state.repository?.files || []) {
-    const button = el("button", `file-item ${file === state.activeFile ? "active" : ""}`);
-    button.append(el("span", `file-state ${file.status}`));
-    button.append(el("span", "file-path", file.path));
-    button.append(el("span", "file-stats", `+${file.additions} −${file.deletions}`));
-    button.onclick = () => { state.activeFile = file; renderFiles(); renderDiff(); };
-    list.append(button);
-  }
+  fileTree.select(state.activeFile?.path || null);
 }
 
 function renderDiff() {
@@ -437,7 +443,10 @@ function jumpToObservation(observation: ReviewObservation, card?: HTMLElement) {
 
 function jumpToSpan(span: CodeLocation) {
   const file = state.repository?.files.find((item) => item.path === span.file);
-  if (file && file !== state.activeFile) { state.activeFile = file; renderFiles(); renderDiff(); }
+  if (!file) return;
+  if (file !== state.activeFile) { state.activeFile = file; renderDiff(); }
+  renderFiles();
+  document.querySelector(".file-item.active")?.scrollIntoView({ block: "nearest" });
   requestAnimationFrame(() => {
     const row = [...document.querySelectorAll<HTMLElement>(".diff-line[data-line]")].find((item) => Number(item.dataset.line) >= span.startLine);
     row?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -447,6 +456,36 @@ function jumpToSpan(span: CodeLocation) {
 
 function openSettings() { $("#settings-modal").classList.remove("hidden"); $("#agent-provider").focus(); }
 function closeSettings() { $("#settings-modal").classList.add("hidden"); }
+
+function selectSearchResult(result: SearchResult) {
+  const file = state.repository?.files.find((item) => item.path === result.file);
+  if (!file) return;
+  state.activeFile = file;
+  renderFiles();
+  renderDiff();
+  document.querySelector(".file-item.active")?.scrollIntoView({ block: "nearest" });
+  requestAnimationFrame(() => {
+    if (result.kind === "file") { $("#diff-scroll").focus({ preventScroll: true }); return; }
+    const row = [...document.querySelectorAll<HTMLElement>(".diff-line[data-line]")].find((item) => item.dataset.side === result.side && Number(item.dataset.line) === result.line);
+    if (!row) return;
+    row.scrollIntoView({ block: "center" });
+    row.tabIndex = -1;
+    row.focus({ preventScroll: true });
+    row.classList.add("search-hit");
+    setCursorAnchor(row, true);
+  });
+}
+
+const fileTree = new FileTreeView($("#file-list"), (file) => {
+  state.activeFile = file;
+  renderFiles();
+  renderDiff();
+});
+
+const searchPalette = new SearchPalette({
+  trigger: $("#file-search"), dialog: $("#search-dialog"), input: $("#search-input"),
+  results: $("#search-results"), status: $("#search-status"), onSelect: selectSearchResult
+});
 
 $("#open-repo").onclick = openRepository;
 $("#empty-open").onclick = openRepository;
