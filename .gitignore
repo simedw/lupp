@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.review-voice-data/
+.code-review-voice/
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.wav
+*.webm
+*.mp3
+*.log
+coverage/
+release/
+*.zip
+.DS_Store

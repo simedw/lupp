@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; media-src 'self' blob: file:; img-src 'self' data:; connect-src 'none'">
+  <title>Lupp</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="titlebar"><span>LUPP / LOCAL REVIEW DESK</span><span id="clock">00:00</span></div>
+  <main class="app-shell">
+    <header class="workbar">
+      <button id="open-repo" class="repo-button"><span class="repo-mark">⌁</span><span><b id="repo-name">Open a checkout</b><small id="repo-meta">Choose a local Git repository</small></span></button>
+      <div class="session-identity"><span>BASE</span><b id="base-ref">—</b><i>→</i><span>HEAD</span><b id="head-ref">—</b></div>
+      <div class="transport">
+        <button id="settings" class="icon-button" title="Agent and transcription settings">SET</button>
+        <button id="mute" class="mute-button" disabled><span class="mic-glyph">●</span><span>MUTED</span></button>
+        <button id="review-toggle" class="review-button" disabled><span class="review-pulse"></span><span>Start review</span></button>
+      </div>
+    </header>
+
+    <section id="empty-state" class="empty-state">
+      <div class="empty-number">01</div>
+      <div><span class="eyebrow">LOCAL REVIEW SESSION</span><h1>Read code.<br>Think out loud.</h1><p>Open a checked-out branch. The desk freezes its diff, listens during an explicit review session, and binds each spoken segment to the code that held your attention.</p><button id="empty-open">Choose repository <span>↗</span></button></div>
+      <div class="empty-diagram"><span>voice</span><i></i><span>attention</span><i></i><span>evidence</span></div>
+    </section>
+
+    <section id="workspace" class="workspace hidden">
+      <nav class="file-rail">
+        <header><span>CHANGED FILES</span><b id="file-count">0</b></header>
+        <div id="file-list" class="file-list"></div>
+      </nav>
+      <section class="proof-stage">
+        <header class="file-heading"><div><span id="file-status">MODIFIED</span><h2 id="file-name">—</h2></div><div class="file-tally"><ins id="file-additions">+0</ins><del id="file-deletions">−0</del></div></header>
+        <div id="diff-scroll" class="diff-scroll"><div id="diff" class="diff"></div></div>
+        <footer class="attention-strip"><span class="live-dot"></span><b id="attention-label">Session idle</b><div id="level-meter" class="level-meter"><i></i></div><span id="attention-location">No active line</span></footer>
+      </section>
+      <aside class="voice-ledger">
+        <header><div><span class="eyebrow">VOICE LEDGER</span><h2>Observations</h2></div><b id="observation-count">0</b></header>
+        <div id="observation-list" class="observation-list"><div class="ledger-empty"><span>◌</span><p>Spoken segments will collect here while you review.</p></div></div>
+      </aside>
+    </section>
+  </main>
+
+  <div id="settings-modal" class="modal hidden">
+    <form id="settings-form" class="settings-card">
+      <button type="button" id="settings-close" class="modal-close">×</button>
+      <span class="eyebrow">PRIVATE CONFIGURATION</span>
+      <h2>Agents &amp; transcription</h2>
+      <p>Choose the coding agent that investigates observations. Keys are encrypted with the operating system’s secure storage and never exposed to the renderer.</p>
+      <label>Review agent<select id="agent-provider"><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+      <div class="provider-status" id="provider-status">Checking agents…</div>
+      <label>OpenAI key · transcription<input id="api-key" type="password" autocomplete="off" placeholder="Leave blank to keep the saved key"></label>
+      <label>Anthropic key · optional<input id="anthropic-api-key" type="password" autocomplete="off" placeholder="Uses existing Claude auth when blank"></label>
+      <div class="settings-status" id="key-status">Checking…</div>
+      <button type="submit">Save settings</button>
+    </form>
+  </div>
+  <div id="toast" class="toast"></div>
+  <script type="module" src="../dist/desktop/app.js"></script>
+</body>
+</html>
