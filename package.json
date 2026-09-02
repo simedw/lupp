@@ -1,5 +1,5 @@
 {
-  "name": "lupp",
+  "name": "@simedw/lupp",
   "version": "0.1.0",
   "type": "module",
   "description": "Review your code with your voice. Lupp pairs your questions with the code you’re looking at and asks Codex or Claude to investigate.",

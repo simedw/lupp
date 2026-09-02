@@ -37,6 +37,7 @@ test("npm command reports version and help without launching Electron", async (t
   const options = { cwd: root, env: { ...env, ELECTRON_OVERRIDE_DIST_PATH: "/nonexistent-electron" } };
   assert.match((await exec(process.execPath, [link, "--version"], options)).stdout, /^Lupp \d+\.\d+\.\d+\n$/);
   assert.match((await exec(process.execPath, [link, "--help"], options)).stdout, /Git checkout/);
+  assert.match((await exec(process.execPath, [link, "--help"], options)).stdout, /npm install -g @simedw\/lupp@latest/);
 });
 
 test("npm command preserves Electron's exit code", async (t) => {

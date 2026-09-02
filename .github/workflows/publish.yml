@@ -33,11 +33,11 @@ jobs:
       - name: Smoke-test packaged command
         run: |
           VERSION=$(node -p 'require("./package.json").version')
-          npm install --prefix /tmp/lupp-smoke --omit=dev "/tmp/lupp-$VERSION.tgz"
+          npm install --prefix /tmp/lupp-smoke --omit=dev "/tmp/simedw-lupp-$VERSION.tgz"
           cd /tmp
           test "$(/tmp/lupp-smoke/node_modules/.bin/lupp --version)" = "Lupp $VERSION"
           /tmp/lupp-smoke/node_modules/.bin/lupp --help
       - name: Publish with npm trusted publishing
         run: |
           VERSION=$(node -p 'require("./package.json").version')
-          npm publish "/tmp/lupp-$VERSION.tgz" --access public
+          npm publish "/tmp/simedw-lupp-$VERSION.tgz" --access public

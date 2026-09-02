@@ -12,7 +12,7 @@ try {
     const { version } = JSON.parse(readFileSync(new URL("package.json", packageRoot), "utf8"));
     console.log(`Lupp ${version}`);
   } else if (args[0] === "--help" || args[0] === "-h") {
-    console.log("Usage: lupp [Electron options]\nRun inside the Git checkout you want to review.\nUpdate: npm install -g lupp@latest");
+    console.log("Usage: lupp [Electron options]\nRun inside the Git checkout you want to review.\nUpdate: npm install -g @simedw/lupp@latest");
   } else {
     const electronPath: string = createRequire(import.meta.url)("electron");
     const env = { ...process.env };

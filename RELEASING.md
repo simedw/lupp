@@ -2,7 +2,7 @@
 
 ## First release
 
-The first publish creates the npm package. Log in with `npm login`, enable
+The first publish creates `@simedw/lupp` on npm. Log in with `npm login`, enable
 two-factor authentication on your npm account, then run from a clean checkout:
 
 ```sh
@@ -10,7 +10,7 @@ npm ci
 npm run check
 npm test
 npm pack
-npm publish ./lupp-0.1.0.tgz --access public
+npm publish ./simedw-lupp-0.1.0.tgz --access public
 ```
 
 Inspect the tarball before publishing. Only compiled app code, its HTML/CSS,
@@ -19,7 +19,7 @@ recordings, review notes, tests, or local configuration.
 
 ## Later releases
 
-In the npm package's settings, add a **Trusted Publisher** for GitHub Actions:
+In the `@simedw/lupp` package's settings, add a **Trusted Publisher** for GitHub Actions:
 user `simedw`, repository `lupp`, workflow filename `publish.yml`. Leave the
 environment field blank. No npm token needs to be added to GitHub.
 
