@@ -5,6 +5,7 @@ import type { AnalysisUpdate } from "./agent-queue.js";
 const reviewAPI: ReviewAPI = {
   chooseRepository: () => ipcRenderer.invoke("repository:choose"),
   initialRepository: () => ipcRenderer.invoke("repository:initial"),
+  loadDiff: (source) => ipcRenderer.invoke("repository:diff", source),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   saveSettings: (settings) => ipcRenderer.invoke("settings:save", settings),
   startSession: (metadata) => ipcRenderer.invoke("session:start", metadata),

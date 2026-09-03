@@ -6,7 +6,8 @@ import { errorMessage } from "./errors.js";
 import { SearchPalette } from "./search-palette.js";
 import type { SearchResult } from "./search.js";
 import { FileTreeView } from "./file-tree-view.js";
-import type { AttentionSample, DiffFile, Repository, Settings } from "./types.js";
+import type { AttentionSample, DiffFile, DiffSnapshot, DiffSource, Repository, Settings } from "./types.js";
+import { diffSources, isDiffSource } from "./diff-source.js";
 import type { AgentProviderId, AgentUsage, Finding, ReviewObservation } from "./agents/types.js";
 
 type State = {
@@ -23,6 +24,9 @@ type State = {
   selectedObservation: string | null;
   apiKeyConfigured: boolean;
   agentProvider: AgentProviderId;
+  diffSource: DiffSource;
+  snapshots: Map<DiffSource, DiffSnapshot>;
+  loadingDiff: boolean;
   attentionTimer?: ReturnType<typeof setInterval>;
   clockTimer?: ReturnType<typeof setInterval>;
 };
@@ -39,7 +43,10 @@ const state: State = {
   nextObservation: 1,
   selectedObservation: null,
   apiKeyConfigured: false,
-  agentProvider: "codex"
+  agentProvider: "codex",
+  diffSource: "branch",
+  snapshots: new Map(),
+  loadingDiff: false
 };
 
 type Controls = {
@@ -51,6 +58,8 @@ type Controls = {
   "#file-search": HTMLButtonElement;
   "#search-dialog": HTMLDialogElement;
   "#search-input": HTMLInputElement;
+  "#diff-source": HTMLSelectElement;
+  "#diff-refresh": HTMLButtonElement;
 };
 function $<K extends keyof Controls>(selector: K): Controls[K];
 function $(selector: string): HTMLElement;
@@ -102,6 +111,8 @@ const voice = new VoiceCapture({
 });
 
 async function openRepository() {
+  if (state.loadingDiff) return;
+  if (state.reviewing) { toast("End the review before changing repositories", "error"); return; }
   try {
     const repository = await window.reviewAPI.chooseRepository();
     if (!repository) return;
@@ -111,6 +122,9 @@ async function openRepository() {
 
 function applyRepository(repository: Repository) {
   state.repository = repository;
+  state.diffSource = "branch";
+  state.snapshots.clear();
+  state.snapshots.set("branch", { files: repository.files, baseSha: repository.baseSha || "", headSha: repository.headSha || "", diffSource: "branch", snapshotId: repository.snapshotId || "", capturedAt: repository.capturedAt || new Date().toISOString() });
   searchPalette.setFiles(repository.files);
   fileTree.setFiles(repository.files);
   state.activeFile = repository.files[0] || null;
@@ -126,22 +140,70 @@ function applyRepository(repository: Repository) {
   $("#repo-meta").textContent = repository.repository;
   $("#base-ref").textContent = repository.baseRef;
   $("#head-ref").textContent = repository.branch;
-  const totals = summarizeDiff(repository.files);
-  const additions = totals.additions.toLocaleString("en");
-  const deletions = totals.deletions.toLocaleString("en");
-  $("#repo-additions").textContent = `+${additions}`;
-  $("#repo-deletions").textContent = `−${deletions}`;
-  $("#repo-tally").setAttribute("aria-label", `Total changes: ${additions} lines added, ${deletions} lines deleted`);
-  $("#repo-tally").classList.remove("hidden");
-  $("#file-count").textContent = String(repository.files.length);
+  renderDiffSummary();
   $("#empty-state").classList.add("hidden");
   $("#workspace").classList.remove("hidden");
-  $("#review-toggle").disabled = repository.files.length === 0;
   renderFiles();
   renderDiff();
   renderObservations();
   if (state.observations.length) toast(`Restored ${state.observations.length} observation${state.observations.length === 1 ? "" : "s"} for ${repository.branch}`);
-  if (!repository.files.length) toast("No committed changes found between base and HEAD", "error");
+}
+
+function renderDiffSummary() {
+  const files = state.repository?.files || [];
+  const source = diffSources[state.diffSource];
+  $("#diff-source").value = state.diffSource;
+  $("#diff-source-label").textContent = source.label;
+  $("#diff-comparison").textContent = source.comparison;
+  $("#diff-provenance").dataset.source = state.diffSource;
+  const capturedAt = state.snapshots.get(state.diffSource)?.capturedAt;
+  $("#diff-captured").textContent = capturedAt ? `Snapshot ${new Date(capturedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
+  $(".search-scope").textContent = `${source.label} · displayed files and diff contents`;
+  const totals = summarizeDiff(files);
+  const additions = totals.additions.toLocaleString("en");
+  const deletions = totals.deletions.toLocaleString("en");
+  $("#repo-additions").textContent = `+${additions}`;
+  $("#repo-deletions").textContent = `−${deletions}`;
+  $("#repo-tally").setAttribute("aria-label", `${source.label}: ${additions} lines added, ${deletions} lines deleted`);
+  $("#repo-tally").title = `Totals for ${source.label.toLowerCase()} only`;
+  $(".tally-label").textContent = state.diffSource.toUpperCase();
+  $("#repo-tally").classList.remove("hidden");
+  $("#file-count").textContent = String(files.length);
+  $("#review-toggle").disabled = !state.reviewing && files.length === 0;
+}
+
+async function switchDiff(source: DiffSource, refresh = false): Promise<boolean> {
+  if (!state.repository || state.loadingDiff) return false;
+  if (refresh && state.reviewing && !state.muted) {
+    toast("Mute before refreshing so an open spoken note keeps its original code snapshot", "error");
+    return false;
+  }
+  state.loadingDiff = true;
+  $("#diff-source").disabled = true;
+  $("#diff-refresh").disabled = true;
+  try {
+    const snapshot = !refresh && state.snapshots.get(source) || await window.reviewAPI.loadDiff(source);
+    state.snapshots.set(source, snapshot);
+    state.diffSource = source;
+    const activePath = state.activeFile?.path;
+    state.repository.files = snapshot.files;
+    state.activeFile = snapshot.files.find((file) => file.path === activePath) || snapshot.files[0] || null;
+    searchPalette.setFiles(snapshot.files);
+    fileTree.setFiles(snapshot.files);
+    renderDiffSummary();
+    renderFiles();
+    renderDiff();
+    if (refresh) { state.attentionRing = []; toast("Snapshot refreshed; saved observations are unchanged"); }
+    return true;
+  } catch (error) {
+    toast(`Could not load changes: ${errorMessage(error)}`, "error");
+    return false;
+  } finally {
+    state.loadingDiff = false;
+    $("#diff-source").value = state.diffSource;
+    $("#diff-source").disabled = false;
+    $("#diff-refresh").disabled = false;
+  }
 }
 
 function renderFiles() {
@@ -152,12 +214,22 @@ function renderDiff() {
   const file = state.activeFile;
   const target = $("#diff");
   target.replaceChildren();
-  if (!file) return;
+  state.cursorAnchor = null;
+  $("#attention-location").textContent = "No active line";
+  if (!file) {
+    $("#file-status").textContent = "NO CHANGES";
+    $("#file-name").textContent = "—";
+    $("#file-additions").textContent = "+0";
+    $("#file-deletions").textContent = "−0";
+    target.append(el("div", "diff-empty", diffSources[state.diffSource].empty));
+    return;
+  }
   $("#file-status").textContent = file.status.toUpperCase();
   $("#file-name").textContent = file.path;
   $("#file-additions").textContent = `+${file.additions}`;
   $("#file-deletions").textContent = `−${file.deletions}`;
   if (file.binary) target.append(el("div", "binary-message", "Binary file changed — no textual proof available."));
+  if (file.previewMessage) target.append(el("div", "binary-message", file.previewMessage));
   for (const hunk of file.hunks) {
     target.append(el("div", "hunk-heading", `@@ −${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount} @@ ${hunk.heading}`));
     for (const line of hunk.lines) {
@@ -165,6 +237,8 @@ function renderDiff() {
       row.dataset.file = file.path;
       row.dataset.side = line.newLine ? "RIGHT" : "LEFT";
       row.dataset.line = String(line.newLine || line.oldLine || "");
+      row.dataset.oldLine = String(line.oldLine ?? "");
+      row.dataset.newLine = String(line.newLine ?? "");
       row.append(el("span", "line-no", line.oldLine ?? ""));
       row.append(el("span", "line-no", line.newLine ?? ""));
       const code = el("span", "line-code");
@@ -195,11 +269,15 @@ function attentionSnapshot(): AttentionSample | null {
     return rect.bottom > viewport.top && rect.top < viewport.bottom && Number(row.dataset.line);
   });
   if (!visible.length || !state.activeFile) return null;
-  const lines = visible.map((row) => Number(row.dataset.line)).filter(Boolean);
+  const side = state.cursorAnchor?.file === state.activeFile.path ? state.cursorAnchor.side : state.activeFile.status === "deleted" ? "LEFT" : "RIGHT";
+  const lines = visible.map((row) => Number(side === "LEFT" ? row.dataset.oldLine : row.dataset.newLine)).filter(Boolean);
+  if (!lines.length) return null;
   return {
     t: performance.now() - state.clockOrigin,
     file: state.activeFile.path,
-    side: state.cursorAnchor?.file === state.activeFile.path ? state.cursorAnchor.side : "RIGHT",
+    source: state.diffSource,
+    snapshotId: state.snapshots.get(state.diffSource)?.snapshotId,
+    side,
     visibleStart: Math.min(...lines),
     visibleEnd: Math.max(...lines),
     cursorLine: state.cursorAnchor?.file === state.activeFile.path ? state.cursorAnchor.line : null
@@ -260,6 +338,7 @@ async function stopReview() {
   $("#mute span:last-child").textContent = "MUTED";
   $("#attention-label").textContent = "Session complete";
   toast("Review session ended; background investigations continue");
+  renderDiffSummary();
 }
 
 function toggleMute() {
@@ -287,7 +366,15 @@ async function processSegment(segment: SpeechSegment, attention: AttentionSample
   const id = `n${state.nextObservation++}`;
   const wav = encodeMonoWav(segment.frames, segment.sampleRate);
   const blob = new Blob([wav], { type: "audio/wav" });
-  const spans = collapseAttention(attention);
+  const spans = collapseAttention(attention).map((span) => {
+    const snapshot = state.snapshots.get(span.source || "branch");
+    const file = snapshot && snapshot.snapshotId === span.snapshotId ? snapshot.files.find((file) => file.path === span.file) : null;
+    const excerpt = file?.hunks.flatMap((hunk) => hunk.lines).filter((line) => {
+      const number = span.side === "LEFT" ? line.oldLine : line.newLine;
+      return number !== null && number >= span.startLine && number <= span.endLine;
+    }).slice(0, 160).map((line) => `${line.oldLine ?? "-"}/${line.newLine ?? "-"} ${line.type}: ${line.text}`).join("\n").slice(0, 16000);
+    return { ...span, excerpt };
+  });
   const observation: ReviewObservation = { id, transcript: "", status: "transcribing", detail: "Sending speech to OpenAI", spans, audioUrl: URL.createObjectURL(blob), durationMs: segment.durationMs, finding: null };
   state.observations.push(observation);
   renderObservations();
@@ -308,13 +395,14 @@ async function processSegment(segment: SpeechSegment, attention: AttentionSample
   }
 }
 
-type CodeLocation = { file: string; startLine: number; endLine: number };
+type CodeLocation = { file: string; startLine: number; endLine: number; source?: DiffSource; snapshotId?: string; side?: "LEFT" | "RIGHT" };
 function markAttention(spans: CodeLocation[]) {
   document.querySelectorAll(".diff-line.attended").forEach((node) => node.classList.remove("attended"));
   for (const span of spans) {
     if (span.file !== state.activeFile?.path) continue;
+    if ((span.source || "branch") !== state.diffSource) continue;
     for (const row of document.querySelectorAll<HTMLElement>(".diff-line[data-line]")) {
-      const line = Number(row.dataset.line);
+      const line = Number(span.side === "LEFT" ? row.dataset.oldLine : span.side === "RIGHT" ? row.dataset.newLine : row.dataset.line);
       if (line >= span.startLine && line <= span.endLine) row.classList.add("attended");
     }
   }
@@ -367,7 +455,8 @@ const updateObservationList = createObservationList<ReviewObservation, HTMLEleme
     }
     const anchors = el("div", "anchor-list");
     for (const span of observation.spans) {
-      const chip = el("button", "anchor-chip", `${span.file.split("/").at(-1)}:${span.startLine}–${span.endLine}`);
+      const chip = el("button", "anchor-chip", `${span.source || "branch"} · ${span.file.split("/").at(-1)}:${span.startLine}–${span.endLine}`);
+      chip.title = `${diffSources[span.source || "branch"].label} · ${span.side} · ${span.file}`;
       chip.onclick = () => jumpToSpan(span);
       anchors.append(chip);
     }
@@ -441,14 +530,18 @@ function jumpToObservation(observation: ReviewObservation, card?: HTMLElement) {
   else toast("This observation has no captured code location", "error");
 }
 
-function jumpToSpan(span: CodeLocation) {
+async function jumpToSpan(span: CodeLocation) {
+  if ((span.source || "branch") !== state.diffSource && !await switchDiff(span.source || "branch")) return;
+  if (span.snapshotId && span.snapshotId !== state.snapshots.get(state.diffSource)?.snapshotId) {
+    toast("Code changed since this note. Showing its original view; line positions may have moved.", "error");
+  }
   const file = state.repository?.files.find((item) => item.path === span.file);
-  if (!file) return;
+  if (!file) { toast("This file is no longer in the selected diff snapshot", "error"); return; }
   if (file !== state.activeFile) { state.activeFile = file; renderDiff(); }
   renderFiles();
   document.querySelector(".file-item.active")?.scrollIntoView({ block: "nearest" });
   requestAnimationFrame(() => {
-    const row = [...document.querySelectorAll<HTMLElement>(".diff-line[data-line]")].find((item) => Number(item.dataset.line) >= span.startLine);
+    const row = [...document.querySelectorAll<HTMLElement>(".diff-line[data-line]")].find((item) => Number(span.side === "LEFT" ? item.dataset.oldLine : span.side === "RIGHT" ? item.dataset.newLine : item.dataset.line) >= span.startLine);
     row?.scrollIntoView({ behavior: "smooth", block: "center" });
     markAttention([span]);
   });
@@ -488,6 +581,8 @@ const searchPalette = new SearchPalette({
 });
 
 $("#open-repo").onclick = openRepository;
+$("#diff-source").onchange = () => { const source = $("#diff-source").value; if (isDiffSource(source)) void switchDiff(source); };
+$("#diff-refresh").onclick = () => { void switchDiff(state.diffSource, true); };
 $("#empty-open").onclick = openRepository;
 $("#review-toggle").onclick = toggleReview;
 $("#mute").onclick = toggleMute;

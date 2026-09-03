@@ -72,7 +72,7 @@ export function collapseAttention(samples: AttentionSample[], intervalMs = 250) 
     if (!sample?.file || !Number.isInteger(sample.visibleStart) || !Number.isInteger(sample.visibleEnd)) continue;
     const side = sample.side === "LEFT" ? "LEFT" : "RIGHT";
     const previous = spans.at(-1);
-    const overlaps = previous && previous.file === sample.file && previous.side === side && sample.visibleStart <= previous.endLine + 12 && sample.visibleEnd >= previous.startLine - 12;
+    const overlaps = previous && previous.file === sample.file && previous.side === side && (previous.source || "branch") === (sample.source || "branch") && previous.snapshotId === sample.snapshotId && sample.visibleStart <= previous.endLine + 12 && sample.visibleEnd >= previous.startLine - 12;
     if (overlaps) {
       previous.startLine = Math.min(previous.startLine, sample.visibleStart);
       previous.endLine = Math.max(previous.endLine, sample.visibleEnd);
@@ -82,6 +82,8 @@ export function collapseAttention(samples: AttentionSample[], intervalMs = 250) 
     } else {
       spans.push({
         file: sample.file,
+        source: sample.source,
+        snapshotId: sample.snapshotId,
         side,
         startLine: sample.visibleStart,
         endLine: sample.visibleEnd,

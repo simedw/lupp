@@ -21,6 +21,8 @@ Open **SET**, choose Codex or Claude, and add an OpenAI API key for transcriptio
 
 Use **⌘K** (Ctrl+K on Linux) to find changed files or search code in the displayed diff. Arrow keys navigate; Enter opens a match.
 
+**Show changes** defaults to committed branch changes. Choose Staged, Unstaged, or Untracked to review local work separately. Search and line totals follow that view. Each view is a snapshot; use Refresh snapshot to pick up edits (mute first during a review). Notes remember their view and warn if the code has changed since capture.
+
 Notes stay in `.lupp/` inside the reviewed repo; keep that folder out of Git. Recordings stay on your computer, but audio is sent to OpenAI for transcription, and the selected agent receives your notes and relevant code.
 
 To update: `npm install -g @simedw/lupp@latest`.

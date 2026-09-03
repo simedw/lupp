@@ -3,10 +3,12 @@ import type { AgentAvailability, AgentProviderId, ReviewObservation } from "./ag
 
 export type DiffLine = { type: "add" | "delete" | "context" | "meta"; oldLine: number | null; newLine: number | null; text: string };
 export type DiffHunk = { oldStart: number; oldCount: number; newStart: number; newCount: number; heading: string; lines: DiffLine[] };
-export type DiffFile = { oldPath: string; path: string; status: "modified" | "added" | "deleted" | "renamed"; hunks: DiffHunk[]; additions: number; deletions: number; binary?: boolean };
+export type DiffSource = "branch" | "staged" | "unstaged" | "untracked";
+export type DiffFile = { oldPath: string; path: string; status: "modified" | "added" | "deleted" | "renamed"; hunks: DiffHunk[]; additions: number; deletions: number; binary?: boolean; previewMessage?: string };
+export type DiffSnapshot = { files: DiffFile[]; diffSource: DiffSource; snapshotId: string; capturedAt: string; baseSha: string; headSha: string };
 export type ReviewMetadata = { repository: string; branch: string; baseRef: string; baseSha?: string; headSha?: string };
-export type Repository = ReviewMetadata & { name: string; files: DiffFile[]; review: { observations: ReviewObservation[]; file: string } };
-export type AttentionSample = { t: number; file: string; side: "LEFT" | "RIGHT"; visibleStart: number; visibleEnd: number; cursorLine: number | null };
+export type Repository = ReviewMetadata & Partial<DiffSnapshot> & { name: string; files: DiffFile[]; review: { observations: ReviewObservation[]; file: string } };
+export type AttentionSample = { t: number; file: string; side: "LEFT" | "RIGHT"; visibleStart: number; visibleEnd: number; cursorLine: number | null; source?: DiffSource; snapshotId?: string };
 export type Settings = {
   apiKeyConfigured: boolean;
   apiKeyError?: string | null;
@@ -19,6 +21,7 @@ export type SettingsInput = { agentProvider: AgentProviderId; openaiApiKey: stri
 export type ReviewAPI = {
   chooseRepository(): Promise<Repository | null>;
   initialRepository(): Promise<Repository | null>;
+  loadDiff(source: DiffSource): Promise<DiffSnapshot>;
   getSettings(): Promise<Settings>;
   saveSettings(settings: SettingsInput): Promise<Settings>;
   startSession(metadata: ReviewMetadata): Promise<{ id: string; startedAt: string; agentProvider: AgentProviderId }>;

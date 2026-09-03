@@ -34,10 +34,12 @@
     <section id="workspace" class="workspace hidden">
       <nav class="file-rail">
         <header><span>CHANGED FILES</span><b id="file-count">0</b></header>
+        <div class="diff-filter"><label for="diff-source">SHOW CHANGES</label><select id="diff-source"><option value="branch">Branch · committed</option><option value="staged">Staged · uncommitted</option><option value="unstaged">Unstaged · uncommitted</option><option value="untracked">Untracked · new files</option></select><button id="diff-refresh" type="button" title="Read this view again from disk. Saved observations stay unchanged.">↻ Refresh snapshot</button></div>
         <button id="file-search" class="file-search-trigger" disabled><span>Find file or code</span><kbd>⌘ K</kbd></button>
         <div id="file-list" class="file-list"></div>
       </nav>
       <section class="proof-stage">
+        <div id="diff-provenance" class="diff-provenance" data-source="branch" role="status"><b id="diff-source-label">Branch · committed</b><span id="diff-comparison">Merge base → HEAD</span><span id="diff-captured"></span></div>
         <header class="file-heading"><div><span id="file-status">MODIFIED</span><h2 id="file-name">—</h2></div><div class="file-tally"><ins id="file-additions">+0</ins><del id="file-deletions">−0</del></div></header>
         <div id="diff-scroll" class="diff-scroll" tabindex="-1"><div id="diff" class="diff"></div></div>
         <footer class="attention-strip"><span class="live-dot"></span><b id="attention-label">Session idle</b><div id="level-meter" class="level-meter"><i></i></div><span id="attention-location">No active line</span></footer>

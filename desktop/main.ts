@@ -12,6 +12,7 @@ import { resolveCodexExecutable } from "./codex-path.js";
 import { loadReview, saveReview } from "./review-store.js";
 import { keySettings, unlockSecret } from "./secrets.js";
 import type { ReviewMetadata, SettingsInput } from "./types.js";
+import { isDiffSource } from "./diff-source.js";
 
 type Config = {
   apiKey?: string;
@@ -183,6 +184,18 @@ ipcMain.handle("repository:initial", async () => {
   const repository = await findInitialRepository();
   if (!repository) return null;
   return loadRepository(repository, process.env.REVIEW_VOICE_BASE_REF);
+});
+
+ipcMain.handle("repository:diff", async (_event, source: unknown) => {
+  if (!activeReview) throw new Error("Open a repository first");
+  if (!isDiffSource(source)) throw new Error("Unknown change source");
+  const metadata = activeReview.metadata;
+  const current = await inspectRepository(metadata.repository);
+  if (current.branch !== metadata.branch || current.headSha !== metadata.headSha) {
+    throw new Error("The branch or HEAD changed. End the review and reopen the repository.");
+  }
+  const { source: _raw, ...diff } = await loadRepositoryDiff(metadata.repository, metadata.baseRef, source);
+  return diff;
 });
 
 ipcMain.handle("settings:get", async () => {
