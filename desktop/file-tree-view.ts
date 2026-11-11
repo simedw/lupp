@@ -7,14 +7,25 @@ export class FileTreeView {
   private active: string | null = null;
   private focused: string | null = null;
   private rows: TreeRow[] = [];
+  private reviewed = new Set<string>();
+  private savingReview = false;
+  private updated = new Set<string>();
 
-  constructor(private readonly container: HTMLElement, private readonly onSelect: (file: DiffFile) => void) {
+  constructor(private readonly container: HTMLElement, private readonly onSelect: (file: DiffFile) => void, private readonly onReview?: (file: DiffFile, reviewed: boolean) => void) {
     container.setAttribute("role", "tree");
     container.setAttribute("aria-label", "Changed files");
   }
 
-  setFiles(files: readonly DiffFile[]) {
+  setReviewed(paths: string[], saving = false) {
+    this.reviewed = new Set(paths);
+    this.savingReview = saving;
+    this.render();
+  }
+
+  setFiles(files: readonly DiffFile[], preserve = false, updated: string[] = []) {
     this.nodes = buildFileTree(files);
+    this.updated = new Set(updated);
+    if (preserve) return;
     this.collapsed.clear();
     this.active = null;
     this.focused = null;
@@ -22,9 +33,9 @@ export class FileTreeView {
     this.container.scrollLeft = 0;
   }
 
-  select(path: string | null) {
+  select(path: string | null, reveal = true) {
     this.active = path;
-    if (path) { revealFileAncestors(path, this.collapsed); this.focused = `file:${path}`; }
+    if (path && reveal) { revealFileAncestors(path, this.collapsed); this.focused = `file:${path}`; }
     this.render();
   }
 
@@ -38,8 +49,8 @@ export class FileTreeView {
     for (const row of this.rows) {
       const { node, key } = row;
       const folder = node.kind === "folder";
-      const button = document.createElement("button");
-      button.type = "button";
+      const button = document.createElement(folder ? "button" : "div");
+      if (button instanceof HTMLButtonElement) button.type = "button";
       button.className = `tree-row ${folder ? "tree-folder" : "file-item"}${!folder && node.path === this.active ? " active" : ""}`;
       button.dataset.treeKey = key;
       button.style.setProperty("--depth", String(row.depth));
@@ -52,6 +63,22 @@ export class FileTreeView {
       const chevron = document.createElement("span");
       chevron.className = folder ? "tree-chevron" : "tree-spacer";
       chevron.setAttribute("aria-hidden", "true");
+      if (!folder && this.onReview) {
+        chevron.removeAttribute("aria-hidden");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.className = "file-review-check";
+        checkbox.tabIndex = -1;
+        checkbox.checked = this.reviewed.has(node.path);
+        checkbox.disabled = this.savingReview || !node.file.reviewId;
+        checkbox.setAttribute("aria-label", `Happy with ${node.path}`);
+        checkbox.title = "Mark this file as reviewed (Space)";
+        checkbox.onclick = (event) => event.stopPropagation();
+        checkbox.onchange = () => { this.focused = key; this.onReview?.(node.file, checkbox.checked); };
+        chevron.append(checkbox);
+        button.classList.toggle("reviewed", checkbox.checked);
+        button.setAttribute("aria-checked", String(checkbox.checked));
+      }
       const icon = document.createElement("span");
       icon.className = folder ? "tree-folder-icon" : `file-state ${node.file.status}`;
       icon.setAttribute("aria-hidden", "true");
@@ -70,6 +97,11 @@ export class FileTreeView {
         button.setAttribute("aria-selected", String(node.path === this.active));
         button.setAttribute("aria-label", `${node.path}, ${node.file.status}, ${node.file.additions} lines added, ${node.file.deletions} lines deleted`);
         button.title = `${node.path}\n${node.file.status} · +${node.file.additions} −${node.file.deletions}`;
+        if (this.updated.has(node.path)) {
+          button.classList.add("file-updated");
+          button.title += "\nUpdated from disk";
+          button.setAttribute("aria-label", `${button.getAttribute("aria-label")}, updated from disk`);
+        }
       }
       button.onfocus = () => this.setFocus(key, false);
       button.onclick = () => {
@@ -82,7 +114,10 @@ export class FileTreeView {
     }
     this.container.scrollTop = scrollTop;
     this.container.scrollLeft = scrollLeft;
-    if (restoreFocus && this.focused) this.setFocus(this.focused, true);
+    if (restoreFocus && this.focused) {
+      const focused = [...this.container.querySelectorAll<HTMLElement>("[role=treeitem]")].find((item) => item.dataset.treeKey === this.focused);
+      focused?.focus({ preventScroll: true });
+    }
   }
 
   private setFocus(key: string, move: boolean) {
@@ -116,7 +151,11 @@ export class FileTreeView {
     } else if (event.key === "ArrowLeft") {
       if (row.node.kind === "folder" && !this.collapsed.has(row.node.path)) this.toggle(row);
       else target = this.rows.find((item) => item.key === row.parent);
-    } else return; // Native button behavior handles Enter and Space.
+    } else if (row.node.kind === "file" && event.key === "Enter") {
+      this.onSelect(row.node.file);
+    } else if (row.node.kind === "file" && event.key === " " && this.onReview) {
+      if (!this.savingReview && row.node.file.reviewId) this.onReview(row.node.file, !this.reviewed.has(row.node.path));
+    } else return; // Native buttons handle folder Enter and Space.
     event.preventDefault();
     if (target) this.setFocus(target.key, true);
   }

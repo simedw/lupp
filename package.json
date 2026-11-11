@@ -1,6 +1,7 @@
 {
   "name": "@simedw/lupp",
-  "version": "0.1.0",
+  "productName": "Lupp",
+  "version": "0.1.1",
   "type": "module",
   "description": "Review your code with your voice. Lupp pairs your questions with the code you’re looking at and asks Codex or Claude to investigate.",
   "license": "MIT",
@@ -16,16 +17,19 @@
     "dist/desktop/**/*.js",
     "dist/desktop/**/*.cjs",
     "dist/scripts/cli.js",
+    "dist/scripts/runtime.js",
     "desktop/index.html",
-    "desktop/styles.css"
+    "desktop/styles.css",
+    "desktop/assets/lupp-icon.png"
   ],
   "os": ["darwin", "linux"],
   "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
   "scripts": {
     "install:local": "npm run build && node dist/scripts/install-local.js",
     "build": "tsc -p tsconfig.json",
+    "icon:build": "npm run build && electron dist/scripts/build-icon.js",
     "prepack": "npm run build",
-    "start": "npm run build && electron dist/desktop/main.js",
+    "start": "npm run build && node dist/scripts/cli.js",
     "test": "npm run build && node --test dist/test/*.test.js",
     "check": "tsc -p tsconfig.json --noEmit"
   },

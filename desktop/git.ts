@@ -57,9 +57,14 @@ export async function loadRepositoryDiff(repository: string, baseRef: string, di
   const headSha = await git(repository, ["rev-parse", "HEAD"]);
   const baseSha = await git(repository, ["merge-base", headSha, baseRef]);
   const revisions = diffSource === "branch" ? [`${baseSha}...${headSha}`] : diffSource === "staged" ? ["--cached", headSha] : [];
-  const source = diffSource === "untracked" ? "" : await git(repository, ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--unified=12", ...revisions], { maxBuffer: 128 * 1024 * 1024, raw: true });
+  const source = diffSource === "untracked" ? "" : await git(repository, ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--full-index", "--find-renames", "--unified=12", ...revisions], { maxBuffer: 128 * 1024 * 1024, raw: true });
   const files = diffSource === "untracked" ? await loadUntrackedFiles(repository) : parseUnifiedDiff(source);
-  const snapshotId = createHash("sha256").update(JSON.stringify({ diffSource, baseSha, headSha, files })).digest("hex");
+  const snapshotId = createHash("sha256").update(JSON.stringify({ diffSource, baseSha, headSha, source, files })).digest("hex");
+  for (const file of files) {
+    // Textual approvals follow this file's displayed diff, not unrelated files.
+    // Binary files carry their own full blob identities from the Git index line.
+    file.reviewId = createHash("sha256").update(JSON.stringify({ diffSource, file })).digest("hex");
+  }
   return { baseSha, headSha, source, files, diffSource, snapshotId, capturedAt: new Date().toISOString() };
 }
 
@@ -74,6 +79,7 @@ async function loadUntrackedFiles(repository: string): Promise<DiffFile[]> {
     const file: DiffFile = { path: name, oldPath: name, status: "added", additions: 0, deletions: 0, hunks: [] };
     try {
       const info = await lstat(absolute);
+      file.contentHash = `${info.size}:${info.mtimeMs}:${info.mode}`;
       if (!info.isFile()) file.previewMessage = "Non-regular file — preview omitted (symlinks are not followed).";
       else if (info.size > 1024 * 1024 || info.size > remainingBytes) file.previewMessage = "Preview omitted: 1 MiB per file / 16 MiB per untracked snapshot limit.";
       else {
@@ -93,6 +99,7 @@ async function loadUntrackedFiles(repository: string): Promise<DiffFile[]> {
           continue;
         }
         remainingBytes -= bytes.length;
+        file.contentHash = createHash("sha256").update(bytes).digest("hex");
         if (bytes.includes(0)) file.binary = true;
         else {
           const text = bytes.toString("utf8");

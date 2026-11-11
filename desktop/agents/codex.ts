@@ -32,12 +32,13 @@ export class CodexAdapter implements AgentAdapter {
     }
     const { Codex } = await import("@openai/codex-sdk");
     const thread = new Codex({ codexPathOverride: this.options.codexPath }).startThread({
+      model: "gpt-6.1",
       workingDirectory: repository,
       sandboxMode: "read-only",
       approvalPolicy: "never",
       networkAccessEnabled: false,
       webSearchMode: "disabled",
-      modelReasoningEffort: "medium"
+      modelReasoningEffort: "low"
     });
     return new CodexSession(thread, this.options.codexPath);
   }

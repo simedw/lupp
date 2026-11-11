@@ -6,9 +6,12 @@ import { errorMessage } from "./errors.js";
 import { SearchPalette } from "./search-palette.js";
 import type { SearchResult } from "./search.js";
 import { FileTreeView } from "./file-tree-view.js";
-import type { AttentionSample, DiffFile, DiffSnapshot, DiffSource, Repository, Settings } from "./types.js";
+import type { AttentionSample, DiffFile, DiffSnapshot, DiffSource, Repository, ReviewedFile, Settings } from "./types.js";
+import { isFileReviewed } from "./file-review.js";
+import { findScrollAnchor, type ScrollLine } from "./scroll-anchor.js";
 import { diffSources, isDiffSource } from "./diff-source.js";
-import type { AgentProviderId, AgentUsage, Finding, ReviewObservation } from "./agents/types.js";
+import type { AgentProviderId, AgentUsage, ReviewObservation } from "./agents/types.js";
+import { actionKey, collectActions, recommendedActions, type ActionSelection } from "./actions.js";
 
 type State = {
   repository: Repository | null;
@@ -27,6 +30,12 @@ type State = {
   diffSource: DiffSource;
   snapshots: Map<DiffSource, DiffSnapshot>;
   loadingDiff: boolean;
+  reviewedFiles: ReviewedFile[];
+  savingFileReview: boolean;
+  dirtySources: Set<DiffSource>;
+  changeVersion: number;
+  autoBlocked: boolean;
+  watchMode: "native" | "fallback";
   attentionTimer?: ReturnType<typeof setInterval>;
   clockTimer?: ReturnType<typeof setInterval>;
 };
@@ -46,7 +55,13 @@ const state: State = {
   agentProvider: "codex",
   diffSource: "branch",
   snapshots: new Map(),
-  loadingDiff: false
+  loadingDiff: false,
+  reviewedFiles: [],
+  savingFileReview: false,
+  dirtySources: new Set(),
+  changeVersion: 0,
+  autoBlocked: false,
+  watchMode: "native"
 };
 
 type Controls = {
@@ -60,6 +75,8 @@ type Controls = {
   "#search-input": HTMLInputElement;
   "#diff-source": HTMLSelectElement;
   "#diff-refresh": HTMLButtonElement;
+  "#copy-actions": HTMLButtonElement;
+  "#live-update": HTMLButtonElement;
 };
 function $<K extends keyof Controls>(selector: K): Controls[K];
 function $(selector: string): HTMLElement;
@@ -102,16 +119,18 @@ const voice = new VoiceCapture({
     $("#attention-label").textContent = state.muted ? "Microphone muted" : "Listening for speech";
     processSegment(segment, [...state.speechAttention]);
     state.speechAttention = [];
+    scheduleAutoRefresh();
   },
   onDiscard: () => {
     document.body.classList.remove("speaking");
     state.speechAttention = [];
     toast("Short sound discarded");
+    scheduleAutoRefresh();
   }
 });
 
 async function openRepository() {
-  if (state.loadingDiff) return;
+  if (state.loadingDiff || state.savingFileReview) return;
   if (state.reviewing) { toast("End the review before changing repositories", "error"); return; }
   try {
     const repository = await window.reviewAPI.chooseRepository();
@@ -121,7 +140,13 @@ async function openRepository() {
 }
 
 function applyRepository(repository: Repository) {
+  state.changeVersion++;
+  state.dirtySources.clear();
+  state.autoBlocked = false;
+  state.watchMode = "native";
+  setUpdateStatus("Watching local edits");
   state.repository = repository;
+  state.reviewedFiles = repository.review.reviewedFiles || [];
   state.diffSource = "branch";
   state.snapshots.clear();
   state.snapshots.set("branch", { files: repository.files, baseSha: repository.baseSha || "", headSha: repository.headSha || "", diffSource: "branch", snapshotId: repository.snapshotId || "", capturedAt: repository.capturedAt || new Date().toISOString() });
@@ -172,42 +197,139 @@ function renderDiffSummary() {
   $("#review-toggle").disabled = !state.reviewing && files.length === 0;
 }
 
-async function switchDiff(source: DiffSource, refresh = false): Promise<boolean> {
-  if (!state.repository || state.loadingDiff) return false;
-  if (refresh && state.reviewing && !state.muted) {
-    toast("Mute before refreshing so an open spoken note keeps its original code snapshot", "error");
+async function switchDiff(source: DiffSource, refresh = false, automatic = false): Promise<boolean> {
+  if (!state.repository || state.loadingDiff || state.savingFileReview) return false;
+  refresh ||= state.dirtySources.has(source);
+  if (refresh && voice.speaking) {
+    if (!automatic) toast("Finish speaking or mute before refreshing this code snapshot", "error");
     return false;
   }
+  const repository = state.repository;
+  const version = state.changeVersion;
   state.loadingDiff = true;
   $("#diff-source").disabled = true;
   $("#diff-refresh").disabled = true;
   try {
     const snapshot = !refresh && state.snapshots.get(source) || await window.reviewAPI.loadDiff(source);
+    if (state.repository !== repository) return false;
+    if (automatic && autoRefreshPaused()) return false;
+    const previous = state.snapshots.get(source);
+    if (version === state.changeVersion) state.dirtySources.delete(source);
+    if (automatic && previous?.snapshotId === snapshot.snapshotId) {
+      if ($("#live-update").textContent?.startsWith("Update pending")) setUpdateStatus("Watching local edits");
+      return true;
+    }
+    const preserve = refresh && source === state.diffSource;
+    const scroll = preserve ? captureDiffScroll() : null;
+    const oldActive = state.activeFile;
+    const updated = snapshot.files.filter((file) => previous?.files.find((old) => old.path === file.path)?.reviewId !== file.reviewId).map((file) => file.path);
     state.snapshots.set(source, snapshot);
     state.diffSource = source;
     const activePath = state.activeFile?.path;
     state.repository.files = snapshot.files;
-    state.activeFile = snapshot.files.find((file) => file.path === activePath) || snapshot.files[0] || null;
+    state.activeFile = snapshot.files.find((file) => file.path === activePath) || (preserve && oldActive ? null : snapshot.files[0] || null);
     searchPalette.setFiles(snapshot.files);
-    fileTree.setFiles(snapshot.files);
+    fileTree.setFiles(snapshot.files, preserve, preserve ? updated : []);
     renderDiffSummary();
-    renderFiles();
-    renderDiff();
-    if (refresh) { state.attentionRing = []; toast("Snapshot refreshed; saved observations are unchanged"); }
+    renderFiles(!preserve);
+    if (!preserve || !oldActive?.reviewId || oldActive.reviewId !== state.activeFile?.reviewId) {
+      renderDiff();
+      if (preserve && oldActive && !state.activeFile) $("#diff").replaceChildren(el("div", "diff-empty", `${oldActive.path} is no longer in this diff. It may have been staged, removed, or reverted. Choose a file to continue.`));
+      if (scroll && state.activeFile?.path === activePath) restoreDiffScroll(scroll);
+    }
+    if (refresh) {
+      state.attentionRing = [];
+      setUpdateStatus(`Updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`, updated.length ? `Updated from disk: ${updated.join(", ")}. Changed diffs become unchecked.` : "Snapshot refreshed; notes are unchanged.");
+      if (!automatic) toast("Snapshot refreshed; saved observations are unchanged");
+    } else setUpdateStatus("Watching local edits");
     return true;
   } catch (error) {
-    toast(`Could not load changes: ${errorMessage(error)}`, "error");
+    if (automatic) {
+      state.autoBlocked = true;
+      setUpdateStatus("Auto-update paused", errorMessage(error));
+    } else toast(`Could not load changes: ${errorMessage(error)}`, "error");
     return false;
   } finally {
     state.loadingDiff = false;
     $("#diff-source").value = state.diffSource;
     $("#diff-source").disabled = false;
     $("#diff-refresh").disabled = false;
+    if (!automatic) state.autoBlocked = false;
+    scheduleAutoRefresh();
   }
 }
 
-function renderFiles() {
-  fileTree.select(state.activeFile?.path || null);
+function renderFiles(reveal = true) {
+  renderFileChecks();
+  fileTree.select(state.activeFile?.path || null, reveal);
+}
+
+function scrollLines() { return [...document.querySelectorAll<HTMLElement>(".diff-line[data-line]")].filter((row) => Number(row.dataset.line)); }
+function scrollLine(row: HTMLElement): ScrollLine { return { text: row.querySelector(".line-code")?.textContent || "", side: row.dataset.side || "RIGHT", line: Number(row.dataset.line) }; }
+function captureDiffScroll() {
+  const viewport = $("#diff-scroll");
+  const top = viewport.getBoundingClientRect().top;
+  const row = scrollLines().find((row) => row.getBoundingClientRect().bottom > top);
+  return { top: viewport.scrollTop, left: viewport.scrollLeft, anchor: row ? scrollLine(row) : null, offset: row ? row.getBoundingClientRect().top - top : 0 };
+}
+function restoreDiffScroll(saved: ReturnType<typeof captureDiffScroll>) {
+  const viewport = $("#diff-scroll");
+  const rows = scrollLines();
+  const index = saved.anchor ? findScrollAnchor(rows.map(scrollLine), saved.anchor) : -1;
+  viewport.scrollTop = index === -1 ? saved.top : viewport.scrollTop + rows[index].getBoundingClientRect().top - viewport.getBoundingClientRect().top - saved.offset;
+  viewport.scrollLeft = saved.left;
+}
+
+let autoRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+function setUpdateStatus(text: string, detail = "Native filesystem notifications; updates pause while speaking or searching.") {
+  $("#live-update").textContent = text;
+  $("#live-update").title = detail + (state.watchMode === "fallback" ? " Native watching unavailable: fallback checks every 30 seconds; hidden views defer refreshes." : "");
+}
+function autoRefreshPaused() {
+  return voice.speaking || document.hidden || $("#search-dialog").open || !$("#settings-modal").classList.contains("hidden");
+}
+function scheduleAutoRefresh() {
+  if (autoRefreshTimer || !state.dirtySources.has(state.diffSource) || state.autoBlocked || document.hidden) return;
+  autoRefreshTimer = setTimeout(async () => {
+    autoRefreshTimer = undefined;
+    if (!state.dirtySources.has(state.diffSource) || state.autoBlocked) return;
+    if (autoRefreshPaused() || state.loadingDiff || state.savingFileReview) {
+      setUpdateStatus(voice.speaking ? "Update pending · speaking" : "Update pending");
+      scheduleAutoRefresh();
+      return;
+    }
+    await switchDiff(state.diffSource, true, true);
+  }, 1000);
+}
+
+window.reviewAPI.onRepositoryChange((change) => {
+  if (change.repository !== state.repository?.repository) return;
+  state.changeVersion++;
+  state.watchMode = change.mode;
+  for (const source of change.sources) state.dirtySources.add(source);
+  if (state.autoBlocked) return;
+  if (change.mode === "fallback") setUpdateStatus($("#live-update").textContent || "Watching local edits");
+  if (state.dirtySources.has(state.diffSource)) scheduleAutoRefresh();
+  else setUpdateStatus("Local edits changed", "This change view is unchanged. Choose Unstaged or Untracked to see local edits.");
+});
+document.addEventListener("visibilitychange", () => { if (!document.hidden) scheduleAutoRefresh(); });
+
+function renderFileChecks() {
+  const files = state.repository?.files || [];
+  const checked = files.filter((file) => isFileReviewed(state.reviewedFiles, file, state.diffSource));
+  fileTree.setReviewed(checked.map((file) => file.path), state.savingFileReview);
+  $("#file-review-count").textContent = `${checked.length} / ${files.length} reviewed`;
+}
+
+async function toggleFileReview(file: DiffFile, reviewed: boolean) {
+  if (state.savingFileReview || state.loadingDiff || !file.reviewId) return;
+  state.savingFileReview = true;
+  renderFileChecks();
+  try {
+    const result = await window.reviewAPI.setFileReviewed({ path: file.path, source: state.diffSource, reviewId: file.reviewId, reviewed });
+    state.reviewedFiles = result.reviewedFiles;
+  } catch (error) { toast(`Could not save file check: ${errorMessage(error)}`, "error"); }
+  finally { state.savingFileReview = false; renderFileChecks(); }
 }
 
 function renderDiff() {
@@ -408,7 +530,7 @@ function markAttention(spans: CodeLocation[]) {
   }
 }
 
-const cardResults = new WeakMap<HTMLElement, Pick<ReviewObservation, "finding" | "usage">>();
+const cardResults = new WeakMap<HTMLElement, Pick<ReviewObservation, "finding" | "usage" | "dismissedActionKeys" | "status">>();
 const updateObservationList = createObservationList<ReviewObservation, HTMLElement>($("#observation-list"), {
   createEmpty() {
     const empty = el("div", "ledger-empty");
@@ -455,7 +577,8 @@ const updateObservationList = createObservationList<ReviewObservation, HTMLEleme
     }
     const anchors = el("div", "anchor-list");
     for (const span of observation.spans) {
-      const chip = el("button", "anchor-chip", `${span.source || "branch"} · ${span.file.split("/").at(-1)}:${span.startLine}–${span.endLine}`);
+      const sourceLabel = span.source && span.source !== "branch" ? `${span.source} · ` : "";
+      const chip = el("button", "anchor-chip", `${sourceLabel}${span.file.split("/").at(-1)}:${span.startLine}–${span.endLine}`);
       chip.title = `${diffSources[span.source || "branch"].label} · ${span.side} · ${span.file}`;
       chip.onclick = () => jumpToSpan(span);
       anchors.append(chip);
@@ -475,29 +598,74 @@ const updateObservationList = createObservationList<ReviewObservation, HTMLEleme
       transcript.value = observation.transcript;
     }
     const previous = cardResults.get(card);
-    if (previous?.finding !== observation.finding) {
+    if (previous?.finding !== observation.finding || previous?.dismissedActionKeys !== observation.dismissedActionKeys || previous?.status !== observation.status) {
       card.querySelector(".finding")?.remove();
-      if (observation.finding) card.append(renderFinding(observation.finding));
+      if (observation.finding) card.append(renderFinding(observation));
     }
+    card.classList.toggle("has-actions", collectActions([observation]).length > 0);
+    card.classList.toggle("needs-decision", observation.finding?.decision === "needs-decision");
     if (previous?.usage !== observation.usage) {
       card.querySelector(".usage-strip")?.remove();
       if (observation.usage) card.append(renderUsage(observation.usage));
     }
-    cardResults.set(card, { finding: observation.finding, usage: observation.usage });
+    cardResults.set(card, { finding: observation.finding, usage: observation.usage, dismissedActionKeys: observation.dismissedActionKeys, status: observation.status });
   }
 });
 
 function renderObservations() {
   $("#observation-count").textContent = String(state.observations.length);
+  const count = collectActions(state.observations).length;
+  $("#action-count").textContent = `${count} action${count === 1 ? "" : "s"}`;
+  $("#copy-actions").disabled = count === 0;
   updateObservationList(state.observations);
 }
 
-function renderFinding(finding: Finding) {
+async function copyActions(selection?: ActionSelection) {
+  try {
+    const { count } = await window.reviewAPI.copyActions(selection);
+    toast(`Copied ${count} action${count === 1 ? "" : "s"} — paste into your coding agent`);
+  } catch (error) { toast(`Could not copy actions: ${errorMessage(error)}`, "error"); }
+}
+
+function renderFinding(observation: ReviewObservation) {
+  const finding = observation.finding!;
   const box = el("div", "finding");
   const head = el("div", "finding-head");
-  head.append(el("b", "", finding.severity), el("span", "", `${Math.round((finding.confidence || 0) * 100)}% confidence`));
+  const label = finding.decision === "action-recommended" ? "Action recommended" : finding.decision === "needs-decision" ? "Needs your decision" : finding.decision === "answered" ? "Answered" : finding.severity;
+  head.append(el("b", "", label), el("span", "", `${Math.round((finding.confidence || 0) * 100)}% confidence`));
   box.append(head, el("p", "", finding.summary));
   if (finding.suggestedComment) box.append(el("blockquote", "", finding.suggestedComment));
+  for (const action of recommendedActions(observation)) {
+    const key = actionKey(action);
+    const dismissed = observation.dismissedActionKeys?.includes(key) || false;
+    const block = el("section", `recommended-action${dismissed ? " dismissed" : ""}`);
+    block.dataset.actionKey = key;
+    block.append(el("span", "action-kind", `${dismissed ? "Dismissed" : "Recommended action"} · ${action.kind}`), el("h3", "", action.title), el("p", "action-rationale", action.rationale));
+    const locations = el("div", "action-locations");
+    for (const location of action.locations) locations.append(el("div", "", `${location.file}:${location.startLine}–${location.endLine}`));
+    block.append(locations);
+    const buttons = el("div", "action-buttons");
+    const copy = el("button", "action-copy", "Copy action");
+    copy.type = "button";
+    copy.disabled = dismissed;
+    copy.onclick = () => { void copyActions({ observationId: observation.id, actionKey: key }); };
+    const dismiss = el("button", "action-dismiss", dismissed ? "Restore" : "Dismiss");
+    dismiss.type = "button";
+    dismiss.title = dismissed ? "Include in the implementation brief again" : "Keep in this note, but exclude from copied actions";
+    dismiss.onclick = async () => {
+      dismiss.disabled = true;
+      try {
+        const result = await window.reviewAPI.dismissAction({ observationId: observation.id, actionKey: key, dismissed: !dismissed });
+        observation.dismissedActionKeys = result.dismissedActionKeys;
+        renderObservations();
+        const replacement = [...document.querySelectorAll<HTMLElement>(".recommended-action")].find((node) => node.dataset.actionKey === key && node.closest(".observation")?.querySelector(".observation-id")?.textContent === observation.id);
+        replacement?.querySelector<HTMLButtonElement>(".action-dismiss")?.focus({ preventScroll: true });
+      } catch (error) { dismiss.disabled = false; toast(`Could not save action: ${errorMessage(error)}`, "error"); }
+    };
+    buttons.append(copy, dismiss);
+    block.append(buttons);
+    box.append(block);
+  }
   return box;
 }
 
@@ -573,7 +741,7 @@ const fileTree = new FileTreeView($("#file-list"), (file) => {
   state.activeFile = file;
   renderFiles();
   renderDiff();
-});
+}, (file, reviewed) => { void toggleFileReview(file, reviewed); });
 
 const searchPalette = new SearchPalette({
   trigger: $("#file-search"), dialog: $("#search-dialog"), input: $("#search-input"),
@@ -581,7 +749,9 @@ const searchPalette = new SearchPalette({
 });
 
 $("#open-repo").onclick = openRepository;
-$("#diff-source").onchange = () => { const source = $("#diff-source").value; if (isDiffSource(source)) void switchDiff(source); };
+$("#copy-actions").onclick = () => { void copyActions(); };
+$("#live-update").onclick = () => { if (state.autoBlocked) toast($("#live-update").title, "error"); else { state.dirtySources.add(state.diffSource); scheduleAutoRefresh(); } };
+$("#diff-source").onchange = async () => { const source = $("#diff-source").value; if (isDiffSource(source) && !await switchDiff(source)) $("#diff-source").value = state.diffSource; };
 $("#diff-refresh").onclick = () => { void switchDiff(state.diffSource, true); };
 $("#empty-open").onclick = openRepository;
 $("#review-toggle").onclick = toggleReview;

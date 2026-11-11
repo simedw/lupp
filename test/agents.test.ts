@@ -113,3 +113,55 @@ test("an incomplete stream fails visibly and the next queued note still runs", a
   assert.equal(updates.at(-1)?.id, "n2");
   assert.equal(updates.at(-1)?.status, "ready");
 });
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+for (const outcome of ["completed", "error", "creating", "reopened"] as const) {
+  test(`switching reviews discards stale ${outcome} updates and starts new work immediately`, async () => {
+    const updates: AnalysisUpdate[] = [];
+    const gate = deferred();
+    const started = deferred();
+    let sessions = 0;
+    const queue = new AgentReviewQueue((update) => updates.push(update), {
+      id: "codex", name: "Test",
+      async probe() { return { provider: "codex", name: "Test", available: true, detail: "" }; },
+      async createSession(repository) {
+        const first = ++sessions === 1;
+        if (first && outcome === "creating") { started.resolve(); await gate.promise; }
+        return {
+          async *analyze() {
+            if (first) {
+              started.resolve();
+              await gate.promise;
+              if (outcome === "error") throw new Error("Old review failed");
+              yield { type: "progress", detail: "Old progress" };
+            }
+            yield { type: "completed", finding: { ...finding, summary: `${repository}:${first ? "old" : "new"}` }, usage: null };
+          },
+          async dispose() {}
+        };
+      }
+    });
+    await queue.setRepository("/repo-a");
+    queue.enqueue({ id: "n1", transcript: "old", spans: [] });
+    await started.promise;
+    const nextRepository = outcome === "reopened" ? "/repo-a" : "/repo-b";
+    await queue.setRepository(nextRepository, outcome === "reopened");
+    updates.length = 0;
+    queue.enqueue({ id: "n1", transcript: "new", spans: [] });
+    await new Promise((resolve) => setImmediate(resolve));
+    const beforeRelease = [...updates];
+    gate.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(beforeRelease.at(-1)?.finding?.summary, `${nextRepository}:new`, "new review must not wait for old work");
+    assert.deepEqual(updates, beforeRelease, "old work must not update the new note with the same ID");
+    queue.enqueue({ id: "n2", transcript: "next", spans: [] });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(updates.at(-1)?.finding?.summary, `${nextRepository}:new`);
+    assert.equal(sessions, 2, "stale session creation must not replace the current session");
+  });
+}

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, session } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session } from "electron";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,8 +11,11 @@ import type { AgentAdapter, AgentProviderId, ReviewObservation } from "./agents/
 import { resolveCodexExecutable } from "./codex-path.js";
 import { loadReview, saveReview } from "./review-store.js";
 import { keySettings, unlockSecret } from "./secrets.js";
-import type { ReviewMetadata, SettingsInput } from "./types.js";
+import type { DiffSnapshot, DiffSource, ReviewedFile, ReviewMetadata, SettingsInput } from "./types.js";
+import { updateReviewedFiles } from "./file-review.js";
 import { isDiffSource } from "./diff-source.js";
+import { collectActions, formatActionBrief, setActionDismissed, type ActionSelection } from "./actions.js";
+import { watchRepository } from "./repository-watcher.js";
 
 type Config = {
   apiKey?: string;
@@ -20,7 +23,8 @@ type Config = {
   agentProvider?: AgentProviderId;
 };
 
-type ActiveReview = { metadata: ReviewMetadata; observations: ReviewObservation[] };
+type ActiveReview = { metadata: ReviewMetadata; observations: ReviewObservation[]; reviewedFiles: ReviewedFile[] };
+const diffSnapshots = new Map<DiffSource, DiffSnapshot>();
 type ActiveSession = {
   id: string;
   root: string;
@@ -37,6 +41,8 @@ let adapters: Record<AgentProviderId, AgentAdapter>;
 let codexPath: string | null = null;
 let codexError: string | null = null;
 let reviewWrite = Promise.resolve();
+let repositoryWatcher: { close(): void } | undefined;
+let watcherGeneration = 0;
 
 app.setName("Lupp");
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -98,7 +104,7 @@ function persistActiveReview() {
   const review = activeReview;
   const sessionSnapshot = activeSession;
   reviewWrite = reviewWrite.catch(() => {}).then(async () => {
-    await saveReview(review.metadata, review.observations);
+    await saveReview(review.metadata, review.observations, review.reviewedFiles);
     if (sessionSnapshot) {
       sessionSnapshot.observations = review.observations;
       await writeFile(path.join(sessionSnapshot.root, "session.json"), `${JSON.stringify(sessionSnapshot, null, 2)}\n`, { mode: 0o600 });
@@ -113,10 +119,22 @@ async function loadRepository(repository: string, requestedBaseRef?: string) {
   const diff = await loadRepositoryDiff(metadata.repository, baseRef);
   const reviewMetadata = { ...metadata, baseRef };
   const review = await loadReview(reviewMetadata);
-  activeReview = { metadata: reviewMetadata, observations: review.observations };
+  // Reopening the same checkout can select a different branch/review too.
+  await queue.setRepository(metadata.repository, true);
+  const generation = ++watcherGeneration;
+  repositoryWatcher?.close();
+  activeReview = { metadata: reviewMetadata, observations: review.observations, reviewedFiles: review.reviewedFiles };
+  diffSnapshots.clear();
+  diffSnapshots.set("branch", diff);
   activeSession = null;
-  await queue.setRepository(metadata.repository);
-  return { ...metadata, baseRef, ...diff, review: { observations: review.observations, file: review.file }, source: undefined };
+  try {
+    const watcher = await watchRepository(metadata.repository, (change) => {
+      if (generation === watcherGeneration && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("repository:changed", change);
+    });
+    if (generation === watcherGeneration) repositoryWatcher = watcher;
+    else watcher.close();
+  } catch (error) { console.error("[repository-watch]", error); }
+  return { ...metadata, baseRef, ...diff, review: { observations: review.observations, file: review.file, reviewedFiles: review.reviewedFiles }, source: undefined };
 }
 
 function handleAnalysisUpdate(update: AnalysisUpdate) {
@@ -141,6 +159,8 @@ async function createWindow() {
   queue = new AgentReviewQueue(handleAnalysisUpdate, adapters[provider]);
 
   mainWindow = new BrowserWindow({
+    title: "Lupp",
+    icon: desktopAsset("assets/lupp-icon.png"),
     width: 1520,
     height: 980,
     minWidth: 1080,
@@ -161,6 +181,8 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  // BrowserWindow's icon is used on Linux; macOS needs its Dock icon set explicitly.
+  app.dock?.setIcon(desktopAsset("assets/lupp-icon.png"));
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
     const trusted = contents.getURL().startsWith("file:");
     callback(trusted && permission === "media");
@@ -169,7 +191,8 @@ app.whenReady().then(async () => {
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
 });
 
-app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
+app.on("window-all-closed", () => { app.quit(); });
+app.on("before-quit", () => { watcherGeneration++; repositoryWatcher?.close(); });
 
 ipcMain.handle("repository:choose", async () => {
   const result = await dialog.showOpenDialog(mainWindow!, {
@@ -195,7 +218,21 @@ ipcMain.handle("repository:diff", async (_event, source: unknown) => {
     throw new Error("The branch or HEAD changed. End the review and reopen the repository.");
   }
   const { source: _raw, ...diff } = await loadRepositoryDiff(metadata.repository, metadata.baseRef, source);
+  diffSnapshots.set(source, diff);
   return diff;
+});
+
+ipcMain.handle("file:reviewed", async (_event, payload: ReviewedFile & { reviewed: boolean }) => {
+  if (!activeReview) throw new Error("Open a repository first");
+  if (!payload || !isDiffSource(payload.source) || typeof payload.path !== "string" || typeof payload.reviewId !== "string" || typeof payload.reviewed !== "boolean") throw new Error("Invalid file review");
+  const file = diffSnapshots.get(payload.source)?.files.find((file) => file.path === payload.path);
+  if (!file || file.reviewId !== payload.reviewId) throw new Error("The displayed file changed. Refresh this view before checking it.");
+  const review = activeReview;
+  const previous = review.reviewedFiles;
+  review.reviewedFiles = updateReviewedFiles(previous, payload, payload.reviewed);
+  try { await persistActiveReview(); }
+  catch (error) { review.reviewedFiles = previous; throw error; }
+  return { reviewedFiles: review.reviewedFiles };
 });
 
 ipcMain.handle("settings:get", async () => {
@@ -235,7 +272,7 @@ ipcMain.handle("session:start", async (_event, metadata: ReviewMetadata) => {
   await mkdir(path.join(root, "audio"), { recursive: true });
   if (!activeReview || activeReview.metadata.repository !== metadata.repository || activeReview.metadata.branch !== metadata.branch) {
     const review = await loadReview(metadata);
-    activeReview = { metadata, observations: review.observations };
+    activeReview = { metadata, observations: review.observations, reviewedFiles: review.reviewedFiles };
   }
   activeSession = { id, root, metadata, observations: activeReview.observations, startedAt: new Date().toISOString() };
   await writeFile(path.join(root, "session.json"), `${JSON.stringify(activeSession, null, 2)}\n`, { mode: 0o600 });
@@ -296,4 +333,25 @@ ipcMain.handle("observation:delete", async (_event, idValue: string) => {
   if (activeSession) activeSession.observations = activeReview.observations;
   await persistActiveReview();
   return { status: "deleted" };
+});
+
+ipcMain.handle("action:dismiss", async (_event, payload: ActionSelection & { dismissed: boolean }) => {
+  if (!activeReview) throw new Error("Open a repository first");
+  if (!payload || typeof payload.actionKey !== "string" || typeof payload.dismissed !== "boolean") throw new Error("Invalid action selection");
+  const id = safeSegmentId(payload.observationId);
+  const observation = activeReview.observations.find((item) => item.id === id);
+  if (!observation) throw new Error("Observation no longer exists");
+  const previous = observation.dismissedActionKeys;
+  setActionDismissed(observation, payload.actionKey, payload.dismissed);
+  try { await persistActiveReview(); }
+  catch (error) { observation.dismissedActionKeys = previous; throw error; }
+  return { dismissedActionKeys: observation.dismissedActionKeys || [] };
+});
+
+ipcMain.handle("actions:copy", (_event, selection?: ActionSelection) => {
+  if (!activeReview) throw new Error("Open a repository first");
+  if (selection !== undefined && (!selection || typeof selection.actionKey !== "string" || !selection.observationId)) throw new Error("Invalid action selection");
+  const brief = formatActionBrief(activeReview.metadata, activeReview.observations, selection);
+  clipboard.writeText(brief);
+  return { count: selection ? 1 : collectActions(activeReview.observations).length };
 });

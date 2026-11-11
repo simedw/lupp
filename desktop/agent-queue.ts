@@ -14,6 +14,7 @@ export class AgentReviewQueue {
   private running = false;
   private session: AgentSession | null = null;
   private repository = "";
+  private generation = 0;
 
   constructor(
     private readonly send: (update: AnalysisUpdate) => void,
@@ -29,12 +30,17 @@ export class AgentReviewQueue {
     this.adapter = adapter;
   }
 
-  async setRepository(repository: string) {
-    if (repository === this.repository) return;
-    await this.session?.dispose();
+  async setRepository(repository: string, reset = false) {
+    if (repository === this.repository && !reset) return;
+    const previous = this.session;
+    // Invalidate before awaiting disposal: providers may still finish a stream,
+    // and a session may even still be in the process of being created.
+    this.generation++;
     this.repository = repository;
     this.session = null;
     this.pending = [];
+    this.running = false;
+    await previous?.dispose();
   }
 
   enqueue(observation: ReviewObservation) {
@@ -46,10 +52,12 @@ export class AgentReviewQueue {
   private async drain() {
     if (this.running || !this.repository) return;
     this.running = true;
-    while (this.pending.length) {
+    const generation = this.generation;
+    while (generation === this.generation && this.pending.length) {
       const observation = this.pending.shift()!;
-      try { await this.analyze(observation); }
+      try { await this.analyze(observation, generation); }
       catch (error) {
+        if (generation !== this.generation) return;
         this.send({
           id: observation.id,
           status: "failed",
@@ -58,12 +66,17 @@ export class AgentReviewQueue {
         });
       }
     }
-    this.running = false;
+    if (generation === this.generation) this.running = false;
   }
 
-  private async analyze(observation: ReviewObservation) {
-    if (!this.session) this.session = await this.adapter.createSession(this.repository);
+  private async analyze(observation: ReviewObservation, generation: number) {
+    if (!this.session) {
+      const session = await this.adapter.createSession(this.repository);
+      if (generation !== this.generation) { await session.dispose(); return; }
+      this.session = session;
+    }
     for await (const event of this.session.analyze(observation)) {
+      if (generation !== this.generation) return;
       if (event.type === "progress") {
         this.send({ id: observation.id, status: "investigating", detail: event.detail, provider: this.adapter.id });
       } else {

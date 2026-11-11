@@ -138,3 +138,31 @@ test("local Git checkout produces a frozen base-to-head diff", async () => {
   assert.equal(diff.files[0].path, "a.js");
   assert.equal(diff.files[0].additions, 2);
 });
+
+test("quoted rename paths decode Git octal UTF-8 and control escapes", () => {
+  const files = parseUnifiedDiff(String.raw`diff --git "a/\303\251\"old.ts" "b/\303\251\tnew.ts"
+similarity index 100%
+rename from "\303\251\"old.ts"
+rename to "\303\251\tnew.ts"
+`);
+  assert.equal(files.length, 1);
+  assert.equal(files[0].oldPath, 'é"old.ts');
+  assert.equal(files[0].path, "é\tnew.ts");
+  assert.equal(files[0].status, "renamed");
+});
+
+test("an unsupported diff header cannot append hunks to the previous file", () => {
+  const files = parseUnifiedDiff(`diff --git a/valid.ts b/valid.ts
+@@ -1 +1 @@
+-old
++new
+diff --git unsupported-header
+@@ -1 +1 @@
+-other
++unrelated
+`);
+  assert.equal(files.length, 1);
+  assert.equal(files[0].additions, 1);
+  assert.equal(files[0].deletions, 1);
+  assert.equal(files[0].hunks.length, 1);
+});

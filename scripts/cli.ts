@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { luppRuntime } from "./runtime.js";
 
 const packageRoot = new URL("../../", import.meta.url);
 const args = process.argv.slice(2);
@@ -14,7 +15,9 @@ try {
   } else if (args[0] === "--help" || args[0] === "-h") {
     console.log("Usage: lupp [Electron options]\nRun inside the Git checkout you want to review.\nUpdate: npm install -g @simedw/lupp@latest");
   } else {
-    const electronPath: string = createRequire(import.meta.url)("electron");
+    const installedElectron: string = createRequire(import.meta.url)("electron");
+    // An explicit custom runtime is owned by its caller; don't rebrand it.
+    const electronPath = process.env.ELECTRON_OVERRIDE_DIST_PATH ? installedElectron : await luppRuntime(installedElectron);
     const env = { ...process.env };
     delete env.ELECTRON_RUN_AS_NODE;
     const child = spawn(electronPath, [fileURLToPath(new URL("dist/desktop/main.js", packageRoot)), ...args], {

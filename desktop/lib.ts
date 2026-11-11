@@ -8,27 +8,54 @@ export function summarizeDiff(files: ReadonlyArray<Pick<DiffFile, "additions" | 
   }), { additions: 0, deletions: 0 });
 }
 
+// Git quotes paths using C escapes, including octal-encoded UTF-8 bytes.
+function decodeGitPath(value: string): string {
+  if (!value.startsWith('"') || !value.endsWith('"')) return value;
+  const escapes: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
+  const bytes: number[] = [];
+  const encoder = new TextEncoder();
+  const encoded = value.slice(1, -1);
+  for (let index = 0; index < encoded.length;) {
+    if (encoded[index] === "\\") {
+      const octal = encoded.slice(index + 1).match(/^[0-7]{1,3}/)?.[0];
+      if (octal) { bytes.push(parseInt(octal, 8)); index += octal.length + 1; continue; }
+      const escape = encoded[index + 1];
+      if (escape in escapes) { bytes.push(escapes[escape]); index += 2; continue; }
+    }
+    const character = String.fromCodePoint(encoded.codePointAt(index)!);
+    bytes.push(...encoder.encode(character));
+    index += character.length;
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
 export function parseUnifiedDiff(source: string): DiffFile[] {
   const files: DiffFile[] = [];
   let file: DiffFile | null = null;
   let hunk: DiffHunk | null = null;
   let oldLine = 0;
   let newLine = 0;
+  let blobIdentity = "";
 
   for (const raw of String(source || "").split("\n")) {
-    const header = raw.match(/^diff --git a\/(.+) b\/(.+)$/);
-    if (header) {
-      file = { oldPath: header[1], path: header[2], status: "modified", hunks: [], additions: 0, deletions: 0 };
-      files.push(file);
+    if (raw.startsWith("diff --git ")) {
+      // Reset even for unsupported headers so hunks never leak to a prior file.
+      const header = raw.match(/^diff --git ("(?:[^"\\]|\\.)*"|a\/.*?) ("(?:[^"\\]|\\.)*"|b\/.*)$/);
+      file = header ? { oldPath: decodeGitPath(header[1]).slice(2), path: decodeGitPath(header[2]).slice(2), status: "modified", hunks: [], additions: 0, deletions: 0 } : null;
+      if (file) files.push(file);
       hunk = null;
+      blobIdentity = "";
       continue;
     }
     if (!file) continue;
     if (raw.startsWith("new file mode ")) file.status = "added";
     if (raw.startsWith("deleted file mode ")) file.status = "deleted";
-    if (raw.startsWith("rename from ")) { file.status = "renamed"; file.oldPath = raw.slice(12); }
-    if (raw.startsWith("rename to ")) file.path = raw.slice(10);
-    if (raw === "GIT binary patch" || raw.startsWith("Binary files ")) { file.binary = true; continue; }
+    if (!hunk && raw.startsWith("index ")) blobIdentity = raw.slice(6);
+    if (raw.startsWith("rename from ")) { file.status = "renamed"; file.oldPath = decodeGitPath(raw.slice(12)); }
+    if (raw.startsWith("rename to ")) file.path = decodeGitPath(raw.slice(10));
+    if (!hunk && raw.startsWith("--- ") && raw.slice(4) !== "/dev/null") file.oldPath = decodeGitPath(raw.slice(4).replace(/\t$/, "")).slice(2);
+    if (!hunk && raw.startsWith("+++ ") && raw.slice(4) !== "/dev/null") file.path = decodeGitPath(raw.slice(4).replace(/\t$/, "")).slice(2);
+    if (raw === "GIT binary patch" || raw.startsWith("Binary files ")) { file.binary = true; file.contentHash = blobIdentity; continue; }
 
     const hunkHeader = raw.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/);
     if (hunkHeader) {

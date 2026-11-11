@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; media-src 'self' blob: file:; img-src 'self' data:; connect-src 'none'">
   <title>Lupp</title>
+  <link rel="icon" type="image/png" href="assets/lupp-icon.png">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -36,16 +37,18 @@
         <header><span>CHANGED FILES</span><b id="file-count">0</b></header>
         <div class="diff-filter"><label for="diff-source">SHOW CHANGES</label><select id="diff-source"><option value="branch">Branch · committed</option><option value="staged">Staged · uncommitted</option><option value="unstaged">Unstaged · uncommitted</option><option value="untracked">Untracked · new files</option></select><button id="diff-refresh" type="button" title="Read this view again from disk. Saved observations stay unchanged.">↻ Refresh snapshot</button></div>
         <button id="file-search" class="file-search-trigger" disabled><span>Find file or code</span><kbd>⌘ K</kbd></button>
+        <div id="file-review-count" class="file-review-count" role="status" aria-live="polite" title="Check files you're happy with. Space toggles a focused file; Enter opens it. Checks apply to this change view and diff snapshot.">0 / 0 reviewed</div>
         <div id="file-list" class="file-list"></div>
       </nav>
       <section class="proof-stage">
-        <div id="diff-provenance" class="diff-provenance" data-source="branch" role="status"><b id="diff-source-label">Branch · committed</b><span id="diff-comparison">Merge base → HEAD</span><span id="diff-captured"></span></div>
+        <div id="diff-provenance" class="diff-provenance" data-source="branch" role="status"><b id="diff-source-label">Branch · committed</b><span id="diff-comparison">Merge base → HEAD</span><span id="diff-captured"></span><button id="live-update" type="button">Watching local edits</button></div>
         <header class="file-heading"><div><span id="file-status">MODIFIED</span><h2 id="file-name">—</h2></div><div class="file-tally"><ins id="file-additions">+0</ins><del id="file-deletions">−0</del></div></header>
         <div id="diff-scroll" class="diff-scroll" tabindex="-1"><div id="diff" class="diff"></div></div>
         <footer class="attention-strip"><span class="live-dot"></span><b id="attention-label">Session idle</b><div id="level-meter" class="level-meter"><i></i></div><span id="attention-location">No active line</span></footer>
       </section>
       <aside class="voice-ledger">
         <header><div><span class="eyebrow">VOICE LEDGER</span><h2>Observations</h2></div><b id="observation-count">0</b></header>
+        <div class="action-toolbar"><span id="action-count" role="status" aria-live="polite">0 actions</span><button id="copy-actions" type="button" disabled title="Copy all non-dismissed recommended actions in this review, across all change views">Copy all actions ↗</button></div>
         <div id="observation-list" class="observation-list"><div class="ledger-empty"><span>◌</span><p>Spoken segments will collect here while you review.</p></div></div>
       </aside>
     </section>
