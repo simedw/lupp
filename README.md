@@ -17,13 +17,15 @@ cd /path/to/your/repo
 lupp
 ```
 
-Open **SET**, choose Codex or Claude, and add an OpenAI API key for transcription. Start a review and talk as you read your branch's diff. Mute whenever you like.
+Open **SET**, choose Codex or Claude, and add an OpenAI API key for transcription. Then read your diff and talk.
 
-Prefer to choose what gets recorded? Mute with **M**, then hold **V** to talk and release to send; Lupp remembers which way you left the microphone. **Esc** discards what is being recorded. **N** types a note instead, anchored to the code on screen, and works without a review session or a transcription key. **J** and **K** move to the next and previous file. These keys work whenever you aren't typing.
+There is one microphone control. Hold **V** to talk and release to send. Tap **V** (or click the button) to keep listening hands-free, where a pause ends each note; press **V** again to stop. **Esc** discards what is being recorded. The microphone opens the first time you use it and is released after five idle minutes.
+
+**N** types a note instead, anchored to the code on screen, and needs no transcription key. **J** and **K** move to the next and previous file. These keys work whenever you aren't typing.
 
 Use **⌘K** (Ctrl+K on Linux) to find changed files or search code in the displayed diff. Arrow keys navigate; Enter opens a match.
 
-**Show changes** opens on committed branch changes, or on **Local** when the branch has none. Local shows everything uncommitted in one view; choose Staged, Unstaged, or Untracked to review those separately. Search and line totals follow that view. Local edits refresh automatically, keeping your place and showing an Updated indicator. Updates wait while you're speaking, searching, or the window is hidden. Lupp uses filesystem notifications, with a 30-second fallback if watching is unavailable. Notes keep their original code context. Committing keeps the review open against the new HEAD; checking out another branch ends the session and loads that branch's changes and notes.
+**Show changes** opens on committed branch changes, or on **Local** when the branch has none. Local shows everything uncommitted in one view; choose Staged, Unstaged, or Untracked to review those separately. Search and line totals follow that view. Local edits refresh automatically, keeping your place and showing an Updated indicator. Updates wait while you're speaking, searching, or the window is hidden. Lupp uses filesystem notifications, with a 30-second fallback if watching is unavailable. Notes keep their original code context. Committing keeps the review open against the new HEAD; checking out another branch stops the microphone and loads that branch's changes and notes.
 
 Check a file in the sidebar when you're happy with it. Checks are saved per branch and change view, and changed diffs become unchecked on refresh. Space toggles the focused file's check; Enter opens it. Checking a file doesn't dismiss its recommended actions.
 

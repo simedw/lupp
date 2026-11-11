@@ -21,14 +21,13 @@
       </div>
       <div class="transport">
         <button id="settings" class="icon-button" title="Agent and transcription settings">SET</button>
-        <button id="mute" class="mute-button" disabled title="Mute or unmute the microphone (M). While muted, hold V to talk."><span class="mic-glyph">●</span><span>MUTED</span></button>
-        <button id="review-toggle" class="review-button" disabled><span class="review-pulse"></span><span>Start review</span></button>
+        <button id="mic" class="mic-button" data-mode="off" aria-pressed="false" disabled><span class="mic-glyph"></span><span class="mic-label">Hold to talk</span><kbd>V</kbd></button>
       </div>
     </header>
 
     <section id="empty-state" class="empty-state">
       <div class="empty-number">01</div>
-      <div><span class="eyebrow">LOCAL REVIEW SESSION</span><h1>Read code.<br>Think out loud.</h1><p>Open a checked-out branch. The desk freezes its diff, listens during an explicit review session, and binds each spoken segment to the code that held your attention.</p><button id="empty-open">Choose repository <span>↗</span></button></div>
+      <div><span class="eyebrow">LOCAL REVIEW SESSION</span><h1>Read code.<br>Think out loud.</h1><p>Open a checked-out branch. Hold V and say what you think. Lupp ties each thing you say to the code you were looking at and has an agent look into it.</p><button id="empty-open">Choose repository <span>↗</span></button></div>
       <div class="empty-diagram"><span>voice</span><i></i><span>attention</span><i></i><span>evidence</span></div>
     </section>
 
@@ -44,7 +43,7 @@
         <div id="diff-provenance" class="diff-provenance" data-source="branch" role="status"><b id="diff-source-label">Branch · committed</b><span id="diff-comparison">Merge base → HEAD</span><span id="diff-captured"></span><button id="live-update" type="button">Watching local edits</button></div>
         <header class="file-heading"><div><span id="file-status">MODIFIED</span><h2 id="file-name">—</h2></div><div class="file-tally"><ins id="file-additions">+0</ins><del id="file-deletions">−0</del></div></header>
         <div id="diff-scroll" class="diff-scroll" tabindex="-1"><div id="diff" class="diff"></div></div>
-        <footer class="attention-strip"><span class="live-dot"></span><b id="attention-label">Session idle</b><div id="level-meter" class="level-meter"><i></i></div><span class="key-hints" title="Keyboard shortcuts, available when you aren't typing"><kbd>V</kbd> hold to talk <kbd>M</kbd> mute <kbd>Esc</kbd> discard <kbd>N</kbd> note <kbd>J</kbd><kbd>K</kbd> file</span><span id="attention-location">No active line</span></footer>
+        <footer class="attention-strip"><span class="live-dot"></span><b id="attention-label">Session idle</b><div id="level-meter" class="level-meter"><i></i></div><span class="key-hints" title="Keyboard shortcuts, available when you aren't typing"><kbd>Esc</kbd> discard <kbd>N</kbd> type a note <kbd>J</kbd><kbd>K</kbd> next / previous file</span><span id="attention-location">No active line</span></footer>
       </section>
       <aside class="voice-ledger">
         <header><div><span class="eyebrow">VOICE LEDGER</span><h2>Observations</h2></div><b id="observation-count">0</b></header>

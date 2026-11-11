@@ -18,7 +18,7 @@ type State = {
   activeFile: DiffFile | null;
   observations: ReviewObservation[];
   reviewing: boolean;
-  muted: boolean;
+  listening: boolean;
   clockOrigin: number;
   cursorAnchor: { file: string; line: number; side: "LEFT" | "RIGHT"; pinned: boolean } | null;
   attentionRing: AttentionSample[];
@@ -36,9 +36,9 @@ type State = {
   changeVersion: number;
   autoBlocked: boolean;
   watchMode: "native" | "fallback";
+  // `reviewing` means the microphone is open; `listening` that it is hands-free.
   // The note whose finding the next spoken segment answers, if any.
   replyTo: string | null;
-  talking: boolean;
   attentionTimer?: ReturnType<typeof setInterval>;
   clockTimer?: ReturnType<typeof setInterval>;
 };
@@ -47,7 +47,7 @@ const state: State = {
   activeFile: null,
   observations: [],
   reviewing: false,
-  muted: true,
+  listening: false,
   clockOrigin: 0,
   cursorAnchor: null,
   attentionRing: [],
@@ -65,13 +65,11 @@ const state: State = {
   changeVersion: 0,
   autoBlocked: false,
   watchMode: "native",
-  replyTo: null,
-  talking: false
+  replyTo: null
 };
 
 type Controls = {
-  "#review-toggle": HTMLButtonElement;
-  "#mute": HTMLButtonElement;
+  "#mic": HTMLButtonElement;
   "#agent-provider": HTMLSelectElement;
   "#api-key": HTMLInputElement;
   "#anthropic-api-key": HTMLInputElement;
@@ -119,7 +117,7 @@ const voice = new VoiceCapture({
   onSpeechStart: ({ startedAt }) => {
     document.body.classList.add("speaking");
     state.speechAttention = state.attentionRing.filter((sample) => sample.t >= startedAt - 750);
-    $("#attention-label").textContent = state.replyTo ? `Recording reply to ${state.replyTo} · Esc discards` : "Recording · Esc discards";
+    renderMic();
   },
   onSpeechEnd: (segment) => {
     document.body.classList.remove("speaking");
@@ -142,10 +140,10 @@ const voice = new VoiceCapture({
 
 async function openRepository() {
   if (state.loadingDiff || state.savingFileReview) return;
-  if (state.reviewing) { toast("End the review before changing repositories", "error"); return; }
   try {
     const repository = await window.reviewAPI.chooseRepository();
     if (!repository) return;
+    await stopReview();
     applyRepository(repository);
   } catch (error) { toast(errorMessage(error), "error"); }
 }
@@ -181,6 +179,8 @@ function applyRepository(repository: Repository) {
   $("#base-ref").textContent = repository.baseRef;
   $("#head-ref").textContent = repository.branch;
   renderDiffSummary();
+  $("#mic").disabled = false;
+  renderMic();
   $("#empty-state").classList.add("hidden");
   $("#workspace").classList.remove("hidden");
   renderFiles();
@@ -209,14 +209,13 @@ function renderDiffSummary() {
   $(".tally-label").textContent = state.diffSource.toUpperCase();
   $("#repo-tally").classList.remove("hidden");
   $("#file-count").textContent = String(files.length);
-  $("#review-toggle").disabled = !state.reviewing && files.length === 0;
 }
 
 async function switchDiff(source: DiffSource, refresh = false, automatic = false): Promise<boolean> {
   if (!state.repository || state.loadingDiff || state.savingFileReview) return false;
   refresh ||= state.dirtySources.has(source);
   if (refresh && voice.speaking) {
-    if (!automatic) toast("Finish speaking or mute before refreshing this code snapshot", "error");
+    if (!automatic) toast("Finish speaking before refreshing this code snapshot", "error");
     return false;
   }
   const repository = state.repository;
@@ -288,7 +287,7 @@ async function switchDiff(source: DiffSource, refresh = false, automatic = false
 // Notes are saved per branch, so a checkout swaps the whole review in place
 // instead of asking for the repository to be reopened.
 async function followBranch(branch: string) {
-  if (state.reviewing) await stopReview();
+  await stopReview();
   applyRepository(await window.reviewAPI.reloadRepository());
   toast(`Checked out ${branch} — showing its changes and notes`);
 }
@@ -449,91 +448,122 @@ function sampleAttention() {
   if (voice.speaking) state.speechAttention.push(sample);
 }
 
-async function toggleReview() {
-  if (state.reviewing) return stopReview();
-  if (!state.repository) return;
-  const settings = await window.reviewAPI.getSettings();
-  applySettings(settings);
-  if (!state.apiKeyConfigured) {
-    openSettings();
-    toast(settings.apiKeyError || "Add an OpenAI key before starting the review", "error");
-    return;
-  }
-  try {
-    const session = await window.reviewAPI.startSession({ repository: state.repository.repository, baseSha: state.repository.baseSha, headSha: state.repository.headSha, baseRef: state.repository.baseRef, branch: state.repository.branch });
-    state.agentProvider = session.agentProvider;
-    await voice.start();
-    state.reviewing = true;
-    // Start the way the last review was left: open mic, or muted for hold-to-talk.
-    state.muted = savedMuted();
-    voice.setMuted(state.muted);
-    state.clockOrigin = performance.now();
-    state.attentionRing = [];
-    document.body.classList.add("reviewing");
-    $("#review-toggle").classList.add("active");
-    $("#review-toggle span:last-child").textContent = "End review";
-    $("#mute").disabled = false;
-    renderMic();
-    state.attentionTimer = setInterval(sampleAttention, 250);
-    state.clockTimer = setInterval(() => { $("#clock").textContent = formatClock(performance.now() - state.clockOrigin); }, 250);
-    toast(state.muted ? "Review started — muted, hold V to talk" : "Review started — microphone live");
-  } catch (error) { toast(`Could not start review: ${errorMessage(error)}`, "error"); }
+// There is one microphone control. Hold V (or the button's key) to talk and
+// release to send; tap it to keep listening hands-free, tap again to stop.
+// The microphone itself is opened on first use and released after a while idle.
+const TAP_MS = 300;
+const MIC_IDLE_MS = 5 * 60_000;
+let pressedAt = 0;      // V is down since this time
+let latchOnReady = false; // V was tapped before the microphone finished opening
+let opening: Promise<boolean> | null = null;
+let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+function openMicrophone(): Promise<boolean> {
+  if (state.reviewing) return Promise.resolve(true);
+  if (opening) return opening;
+  opening = (async () => {
+    const repository = state.repository;
+    if (!repository) return false;
+    try {
+      const settings = await window.reviewAPI.getSettings();
+      applySettings(settings);
+      if (!state.apiKeyConfigured) {
+        openSettings();
+        toast(settings.apiKeyError || "Add an OpenAI key to talk, or press N to type a note", "error");
+        return false;
+      }
+      const session = await window.reviewAPI.startSession({ repository: repository.repository, baseSha: repository.baseSha, headSha: repository.headSha, baseRef: repository.baseRef, branch: repository.branch });
+      state.agentProvider = session.agentProvider;
+      await voice.start();
+      voice.setMuted(true);
+      if (state.repository !== repository) { await voice.stop(); return false; }
+      state.reviewing = true;
+      state.clockOrigin = performance.now();
+      state.attentionRing = [];
+      state.attentionTimer = setInterval(sampleAttention, 250);
+      state.clockTimer = setInterval(() => { $("#clock").textContent = formatClock(performance.now() - state.clockOrigin); }, 250);
+      return true;
+    } catch (error) {
+      toast(`Could not open the microphone: ${errorMessage(error)}`, "error");
+      return false;
+    } finally { opening = null; renderMic(); }
+  })();
+  renderMic();
+  return opening;
 }
 
+// Sends whatever is being recorded, then lets go of the microphone.
 async function stopReview() {
+  if (!state.reviewing) return;
   state.reviewing = false;
   clearInterval(state.attentionTimer);
   clearInterval(state.clockTimer);
-  state.talking = false;
+  clearTimeout(idleTimer);
+  pressedAt = 0;
+  latchOnReady = false;
   await voice.stop();
-  state.muted = true;
+  state.listening = false;
   state.replyTo = null;
-  document.body.classList.remove("reviewing", "speaking");
-  $("#review-toggle").classList.remove("active");
-  $("#review-toggle span:last-child").textContent = "Start review";
-  $("#mute").disabled = true;
+  document.body.classList.remove("speaking");
   renderMic();
   renderObservations();
-  toast("Review session ended; background investigations continue");
-  renderDiffSummary();
-}
-
-function savedMuted() {
-  try { return localStorage.getItem("lupp.muted") === "1"; } catch { return false; }
 }
 
 function renderMic() {
-  const live = state.reviewing && !state.muted;
-  $("#mute").classList.toggle("live", live);
-  $("#mute span:last-child").textContent = live ? "LIVE" : "MUTED";
-  if (voice.speaking) return;
-  $("#attention-label").textContent = !state.reviewing ? "Session idle"
-    : state.replyTo ? `Replying to ${state.replyTo} — ${state.muted ? "hold V and speak" : "speak now"}`
-    : state.muted ? "Muted — hold V to talk" : "Listening for speech";
+  const recording = voice.speaking;
+  const mode = recording ? "recording" : opening ? "opening" : state.listening ? "listening" : "off";
+  document.body.classList.toggle("listening", state.listening);
+  $("#mic").dataset.mode = mode;
+  $("#mic").setAttribute("aria-pressed", String(state.listening));
+  $("#mic .mic-label").textContent = recording ? (pressedAt ? "Release to send" : "Recording") : opening ? "Opening mic…" : state.listening ? "Listening" : "Hold to talk";
+  $("#mic").title = state.listening ? "Listening hands-free. Press V or click to stop." : "Hold V to talk and release to send. Tap V, or click, to keep listening hands-free.";
+  const reply = state.replyTo ? `Replying to ${state.replyTo} · ` : "";
+  $("#attention-label").textContent = opening && !recording ? "Opening the microphone…" : recording ? `${reply}Recording · ${pressedAt ? "release V to send" : "pause to send"} · Esc discards`
+    : state.listening ? `${reply}Listening · speak any time · V stops`
+    : `${reply}Hold V to talk · tap V to keep listening`;
+  // Don't hold the microphone open when nothing is using it.
+  clearTimeout(idleTimer);
+  if (state.reviewing && !state.listening && !recording) idleTimer = setTimeout(() => { void stopReview(); }, MIC_IDLE_MS);
 }
 
-function toggleMute() {
-  if (!state.reviewing) return;
-  state.muted = !state.muted;
-  voice.setMuted(state.muted);
-  try { localStorage.setItem("lupp.muted", state.muted ? "1" : "0"); } catch {}
+function setListening(listening: boolean) {
+  state.listening = listening;
+  // Turning it off sends the segment in progress.
+  voice.setMuted(!listening);
   renderMic();
 }
 
-// Push-to-talk: hold V to record whatever the mute state, release to send.
-function startTalking() {
-  if (state.talking) return;
-  if (!state.reviewing) { toast("Start a review to talk, or press N to type a note"); return; }
-  state.talking = true;
-  voice.hold();
+async function toggleListening() {
+  if (state.listening) setListening(false);
+  else if (await openMicrophone()) setListening(true);
 }
-function stopTalking() {
-  if (!state.talking) return;
-  state.talking = false;
-  voice.release();
+
+async function pressTalk() {
+  if (pressedAt) return;
+  // While listening, V has one meaning: stop.
+  if (state.listening) { setListening(false); return; }
+  pressedAt = performance.now();
+  latchOnReady = false;
+  const ready = await openMicrophone();
+  if (ready && pressedAt) voice.hold();
+  else if (ready && latchOnReady) setListening(true);
+  // Held and let go before the microphone had opened: nothing was recorded.
+  else if (ready) toast("The microphone is ready now — hold V and say that again");
+  latchOnReady = false;
 }
+
+function releaseTalk() {
+  if (!pressedAt) return;
+  const tapped = performance.now() - pressedAt < TAP_MS;
+  pressedAt = 0;
+  if (!state.reviewing) { latchOnReady = tapped; return; }
+  if (!tapped) { voice.release(); return; }
+  voice.cancel();
+  setListening(true);
+}
+
 function discardSpeech() {
-  state.talking = false;
+  pressedAt = 0;
   voice.cancel();
   toast("Recording discarded");
 }
@@ -657,7 +687,7 @@ function markAttention(spans: CodeLocation[]) {
   }
 }
 
-type CardResult = Pick<ReviewObservation, "finding" | "usage" | "dismissedActionKeys" | "status" | "replies" | "actionStates"> & { replyTarget: boolean; reviewing: boolean };
+type CardResult = Pick<ReviewObservation, "finding" | "usage" | "dismissedActionKeys" | "status" | "replies" | "actionStates"> & { replyTarget: boolean };
 const cardResults = new WeakMap<HTMLElement, CardResult>();
 const inFlight = (observation: ReviewObservation) => ["transcribing", "queued", "investigating"].includes(observation.status || "");
 const updateObservationList = createObservationList<ReviewObservation, HTMLElement>($("#observation-list"), {
@@ -734,8 +764,8 @@ const updateObservationList = createObservationList<ReviewObservation, HTMLEleme
     rerun.title = observation.status === "failed" ? "Try this investigation again" : observation.finding ? "Investigate again, using the transcript as it is now" : "Investigate this note";
     rerun.classList.toggle("wanted", observation.status === "failed" || observation.status === "saved");
     const previous = cardResults.get(card);
-    const next: CardResult = { finding: observation.finding, usage: observation.usage, dismissedActionKeys: observation.dismissedActionKeys, status: observation.status, replies: observation.replies, actionStates: observation.actionStates, replyTarget: state.replyTo === observation.id, reviewing: state.reviewing };
-    if (!previous || (["finding", "dismissedActionKeys", "status", "replies", "actionStates", "replyTarget", "reviewing"] as const).some((field) => previous[field] !== next[field])) {
+    const next: CardResult = { finding: observation.finding, usage: observation.usage, dismissedActionKeys: observation.dismissedActionKeys, status: observation.status, replies: observation.replies, actionStates: observation.actionStates, replyTarget: state.replyTo === observation.id };
+    if (!previous || (["finding", "dismissedActionKeys", "status", "replies", "actionStates", "replyTarget"] as const).some((field) => previous[field] !== next[field])) {
       // Progress on one action must not wipe a reply being typed in the same card.
       const draft = card.querySelector<HTMLInputElement>(".reply-form input");
       const typing = draft && document.activeElement === draft;
@@ -830,8 +860,8 @@ function renderFinding(observation: ReviewObservation) {
   input.disabled = busy;
   const speak = el("button", `reply-voice${state.replyTo === observation.id ? " armed" : ""}`, state.replyTo === observation.id ? "● Cancel" : "● Speak");
   speak.type = "button";
-  speak.disabled = busy || !state.reviewing;
-  speak.title = state.reviewing ? "Answer out loud: your next spoken segment becomes the reply" : "Start a review to reply by voice";
+  speak.disabled = busy;
+  speak.title = "Answer out loud: the next thing you say becomes the reply. Hold V, or just speak if Lupp is listening.";
   speak.onclick = () => {
     state.replyTo = state.replyTo === observation.id ? null : observation.id;
     renderMic();
@@ -937,8 +967,7 @@ $("#live-update").onclick = () => { if (state.autoBlocked) toast($("#live-update
 $("#diff-source").onchange = async () => { const source = $("#diff-source").value; if (isDiffSource(source) && !await switchDiff(source)) $("#diff-source").value = state.diffSource; };
 $("#diff-refresh").onclick = () => { void switchDiff(state.diffSource, true); };
 $("#empty-open").onclick = openRepository;
-$("#review-toggle").onclick = toggleReview;
-$("#mute").onclick = toggleMute;
+$("#mic").onclick = () => { void toggleListening(); };
 $("#settings").onclick = openSettings;
 $("#settings-close").onclick = closeSettings;
 $("#settings-modal").onclick = (event) => { if (event.target === $("#settings-modal")) closeSettings(); };
@@ -1003,17 +1032,17 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && voice.speaking) { event.preventDefault(); discardSpeech(); return; }
   if (isTyping(event.target) || !state.repository) return;
   const key = event.key.toLowerCase();
-  if (key === "v") { if (!event.repeat) startTalking(); }
+  if (key === "v") { if (!event.repeat) void pressTalk(); }
   else if (event.repeat) return;
-  else if (key === "m") toggleMute();
   else if (key === "n") $("#note-input").focus();
   else if (key === "j") openFile(fileTree.neighbor(1));
   else if (key === "k") openFile(fileTree.neighbor(-1));
   else return;
   event.preventDefault();
 });
-document.addEventListener("keyup", (event) => { if (event.key.toLowerCase() === "v") stopTalking(); });
-window.addEventListener("blur", stopTalking);
+document.addEventListener("keyup", (event) => { if (event.key.toLowerCase() === "v") releaseTalk(); });
+// A key released while another window has focus never reports its keyup.
+window.addEventListener("blur", () => { if (pressedAt) { pressedAt = performance.now() - TAP_MS; releaseTalk(); } });
 
 window.reviewAPI.onAnalysisUpdate((update) => {
   const observation = state.observations.find((item) => item.id === update.id);

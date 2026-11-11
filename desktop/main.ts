@@ -304,7 +304,7 @@ ipcMain.handle("session:start", async (_event, metadata: ReviewMetadata) => {
 });
 
 ipcMain.handle("segment:transcribe", async (_event, payload: { id: string; wavBase64: string }) => {
-  if (!activeSession) throw new Error("Start a review session first");
+  if (!activeSession) throw new Error("The microphone is not open yet");
   const id = safeSegmentId(payload.id);
   const audio = Buffer.from(payload.wavBase64, "base64");
   if (!audio.length || audio.length > 25 * 1024 * 1024) throw new Error("Invalid or oversized audio segment");
