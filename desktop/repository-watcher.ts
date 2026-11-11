@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import type { RepositoryChange } from "./types.js";
 
 const exec = promisify(execFile);
-const localSources = ["unstaged", "untracked"] as const;
+const localSources = ["local", "unstaged", "untracked"] as const;
 const allSources = ["branch", "staged", ...localSources] as const;
 
 export function ignoredWatchPath(name: string) {

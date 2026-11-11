@@ -6,6 +6,7 @@ const reviewAPI: ReviewAPI = {
   chooseRepository: () => ipcRenderer.invoke("repository:choose"),
   initialRepository: () => ipcRenderer.invoke("repository:initial"),
   loadDiff: (source) => ipcRenderer.invoke("repository:diff", source),
+  reloadRepository: () => ipcRenderer.invoke("repository:reload"),
   setFileReviewed: (file) => ipcRenderer.invoke("file:reviewed", file),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   saveSettings: (settings) => ipcRenderer.invoke("settings:save", settings),

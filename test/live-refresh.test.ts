@@ -53,7 +53,7 @@ test("native directory watches debounce edits, survive replacement, discover dir
   await pause(150);
   assert.equal(events.length, 1, "burst should be coalesced");
   assert.equal(events[0].mode, "native");
-  assert.deepEqual(events[0].sources, ["unstaged", "untracked"]);
+  assert.deepEqual(events[0].sources, ["local", "unstaged", "untracked"]);
   events.length = 0;
   await writeFile(path.join(repository, "src/temp.ts"), "atomic\n");
   await rename(path.join(repository, "src/temp.ts"), path.join(repository, "src/a.ts"));

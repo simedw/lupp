@@ -147,9 +147,11 @@ function applyRepository(repository: Repository) {
   setUpdateStatus("Watching local edits");
   state.repository = repository;
   state.reviewedFiles = repository.review.reviewedFiles || [];
-  state.diffSource = "branch";
+  // The main process opens on the first view that has changes to review.
+  const source = repository.diffSource || "branch";
+  state.diffSource = source;
   state.snapshots.clear();
-  state.snapshots.set("branch", { files: repository.files, baseSha: repository.baseSha || "", headSha: repository.headSha || "", diffSource: "branch", snapshotId: repository.snapshotId || "", capturedAt: repository.capturedAt || new Date().toISOString() });
+  state.snapshots.set(source, { files: repository.files, baseSha: repository.baseSha || "", headSha: repository.headSha || "", diffSource: source, snapshotId: repository.snapshotId || "", capturedAt: repository.capturedAt || new Date().toISOString() });
   searchPalette.setFiles(repository.files);
   fileTree.setFiles(repository.files);
   state.activeFile = repository.files[0] || null;
@@ -210,9 +212,18 @@ async function switchDiff(source: DiffSource, refresh = false, automatic = false
   $("#diff-source").disabled = true;
   $("#diff-refresh").disabled = true;
   try {
-    const snapshot = !refresh && state.snapshots.get(source) || await window.reviewAPI.loadDiff(source);
+    const loaded = !refresh && state.snapshots.get(source) || await window.reviewAPI.loadDiff(source);
     if (state.repository !== repository) return false;
+    if ("branchChanged" in loaded) { await followBranch(loaded.branch); return false; }
+    const snapshot = loaded;
     if (automatic && autoRefreshPaused()) return false;
+    const headMoved = snapshot.headSha !== repository.headSha || snapshot.baseSha !== repository.baseSha;
+    if (headMoved) {
+      // Same branch, new commit: keep the notes and re-read every view lazily.
+      repository.headSha = snapshot.headSha;
+      repository.baseSha = snapshot.baseSha;
+      for (const other of Object.keys(diffSources)) if (other !== source && isDiffSource(other)) state.dirtySources.add(other);
+    }
     const previous = state.snapshots.get(source);
     if (version === state.changeVersion) state.dirtySources.delete(source);
     if (automatic && previous?.snapshotId === snapshot.snapshotId) {
@@ -234,13 +245,14 @@ async function switchDiff(source: DiffSource, refresh = false, automatic = false
     renderFiles(!preserve);
     if (!preserve || !oldActive?.reviewId || oldActive.reviewId !== state.activeFile?.reviewId) {
       renderDiff();
-      if (preserve && oldActive && !state.activeFile) $("#diff").replaceChildren(el("div", "diff-empty", `${oldActive.path} is no longer in this diff. It may have been staged, removed, or reverted. Choose a file to continue.`));
+      if (preserve && oldActive && !state.activeFile) $("#diff").replaceChildren(el("div", "diff-empty", `${oldActive.path} is no longer in this diff. It may have been committed, staged, removed, or reverted. Choose a file to continue.`));
       if (scroll && state.activeFile?.path === activePath) restoreDiffScroll(scroll);
     }
     if (refresh) {
       state.attentionRing = [];
       setUpdateStatus(`Updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`, updated.length ? `Updated from disk: ${updated.join(", ")}. Changed diffs become unchecked.` : "Snapshot refreshed; notes are unchanged.");
-      if (!automatic) toast("Snapshot refreshed; saved observations are unchanged");
+      if (headMoved) toast(`HEAD moved to ${snapshot.headSha.slice(0, 7)} — the review continues with your notes`);
+      else if (!automatic) toast("Snapshot refreshed; saved observations are unchanged");
     } else setUpdateStatus("Watching local edits");
     return true;
   } catch (error) {
@@ -257,6 +269,14 @@ async function switchDiff(source: DiffSource, refresh = false, automatic = false
     if (!automatic) state.autoBlocked = false;
     scheduleAutoRefresh();
   }
+}
+
+// Notes are saved per branch, so a checkout swaps the whole review in place
+// instead of asking for the repository to be reopened.
+async function followBranch(branch: string) {
+  if (state.reviewing) await stopReview();
+  applyRepository(await window.reviewAPI.reloadRepository());
+  toast(`Checked out ${branch} — showing its changes and notes`);
 }
 
 function renderFiles(reveal = true) {

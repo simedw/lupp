@@ -2,7 +2,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session } 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { findInitialRepository, inspectRepository, loadRepositoryDiff } from "./git.js";
+import { findInitialRepository, inspectRepository, loadInitialDiff, loadRepositoryDiff } from "./git.js";
 import { safeSegmentId } from "./lib.js";
 import { AgentReviewQueue, type AnalysisUpdate } from "./agent-queue.js";
 import { CodexAdapter } from "./agents/codex.js";
@@ -43,6 +43,8 @@ let codexError: string | null = null;
 let reviewWrite = Promise.resolve();
 let repositoryWatcher: { close(): void } | undefined;
 let watcherGeneration = 0;
+// An explicit base (REVIEW_VOICE_BASE_REF) must survive reloading its checkout.
+let baseOverride: { repository: string; baseRef: string } | null = null;
 
 app.setName("Lupp");
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -115,8 +117,9 @@ function persistActiveReview() {
 
 async function loadRepository(repository: string, requestedBaseRef?: string) {
   const metadata = await inspectRepository(repository);
+  if (requestedBaseRef) baseOverride = { repository: metadata.repository, baseRef: requestedBaseRef };
   const baseRef = requestedBaseRef || metadata.baseRef;
-  const diff = await loadRepositoryDiff(metadata.repository, baseRef);
+  const diff = await loadInitialDiff(metadata.repository, baseRef);
   const reviewMetadata = { ...metadata, baseRef };
   const review = await loadReview(reviewMetadata);
   // Reopening the same checkout can select a different branch/review too.
@@ -125,7 +128,7 @@ async function loadRepository(repository: string, requestedBaseRef?: string) {
   repositoryWatcher?.close();
   activeReview = { metadata: reviewMetadata, observations: review.observations, reviewedFiles: review.reviewedFiles };
   diffSnapshots.clear();
-  diffSnapshots.set("branch", diff);
+  diffSnapshots.set(diff.diffSource, diff);
   activeSession = null;
   try {
     const watcher = await watchRepository(metadata.repository, (change) => {
@@ -214,12 +217,23 @@ ipcMain.handle("repository:diff", async (_event, source: unknown) => {
   if (!isDiffSource(source)) throw new Error("Unknown change source");
   const metadata = activeReview.metadata;
   const current = await inspectRepository(metadata.repository);
-  if (current.branch !== metadata.branch || current.headSha !== metadata.headSha) {
-    throw new Error("The branch or HEAD changed. End the review and reopen the repository.");
-  }
+  if (current.branch !== metadata.branch) return { branchChanged: true, branch: current.branch };
   const { source: _raw, ...diff } = await loadRepositoryDiff(metadata.repository, metadata.baseRef, source);
+  if (diff.headSha !== metadata.headSha || diff.baseSha !== metadata.baseSha) {
+    // A commit, amend or rebase on the same branch: the review carries on
+    // against the new HEAD, and every other cached view is now stale.
+    activeReview.metadata = { ...metadata, headSha: diff.headSha, baseSha: diff.baseSha };
+    if (activeSession) activeSession.metadata = activeReview.metadata;
+    diffSnapshots.clear();
+  }
   diffSnapshots.set(source, diff);
   return diff;
+});
+
+ipcMain.handle("repository:reload", async () => {
+  if (!activeReview) throw new Error("Open a repository first");
+  const repository = activeReview.metadata.repository;
+  return loadRepository(repository, baseOverride?.repository === repository ? baseOverride.baseRef : undefined);
 });
 
 ipcMain.handle("file:reviewed", async (_event, payload: ReviewedFile & { reviewed: boolean }) => {

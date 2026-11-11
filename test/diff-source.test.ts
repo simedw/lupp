@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promis
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { inspectRepository, loadRepositoryDiff } from "../desktop/git.js";
+import { inspectRepository, loadInitialDiff, loadRepositoryDiff } from "../desktop/git.js";
 import { collapseAttention } from "../desktop/lib.js";
 import { reviewPrompt } from "../desktop/agents/types.js";
 import { loadReview, saveReview } from "../desktop/review-store.js";
@@ -54,6 +54,11 @@ test("branch, staged, unstaged and untracked snapshots are independent and read-
   assert.equal(untracked.files.find((file) => file.path === "empty.ts")?.additions, 0);
   assert.match(untracked.files.find((file) => file.path === "link")?.previewMessage || "", /symlinks are not followed/);
   assert.equal(untracked.files.find((file) => file.path === "new ü file.ts")?.additions, 2);
+  // Local is everything uncommitted in one view: tracked edits against HEAD, then new files.
+  const local = await loadRepositoryDiff(repository, "main", "local");
+  assert.deepEqual(changes(local), [["delete", "committed"], ["add", "unstaged"]]);
+  assert.deepEqual(local.files.map((file) => file.path).sort(), ["binary.bin", "deleted.ts", "empty.ts", "link", "new ü file.ts", "same.ts"]);
+  assert.equal((await loadInitialDiff(repository, "main")).diffSource, "branch");
   assert.deepEqual(await readFile(path.join(repository, ".git/index")), indexBefore);
   await write("same.ts", "later local edit\n");
   assert.notEqual((await loadRepositoryDiff(repository, "main", "unstaged")).snapshotId, unstaged.snapshotId);
@@ -89,6 +94,17 @@ test("single-commit repositories still support local changes with HEAD as fallba
   const metadata = await inspectRepository(repository);
   assert.equal(metadata.baseRef, "HEAD");
   assert.deepEqual((await loadRepositoryDiff(repository, metadata.baseRef)).files, []);
+  assert.equal((await loadInitialDiff(repository, metadata.baseRef)).diffSource, "branch");
   await writeFile(path.join(repository, "new.ts"), "new code\n");
+  // With nothing committed on the branch, open on the uncommitted work instead.
+  const initial = await loadInitialDiff(repository, metadata.baseRef);
+  assert.equal(initial.diffSource, "local");
+  assert.deepEqual(initial.files.map((file) => file.path), ["new.ts"]);
   assert.equal((await loadRepositoryDiff(repository, metadata.baseRef, "untracked")).files.length, 1);
+  // Committing moves HEAD; the same checkout keeps loading against the new commit.
+  await exec("git", ["-C", repository, "add", "new.ts"]);
+  await exec("git", ["-C", repository, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "second"]);
+  const after = await loadRepositoryDiff(repository, metadata.baseRef, "local");
+  assert.notEqual(after.headSha, initial.headSha);
+  assert.deepEqual(after.files, []);
 });

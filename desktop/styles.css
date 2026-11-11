@@ -72,7 +72,7 @@ button:disabled{cursor:not-allowed;opacity:.35}
 .diff-filter button{padding:4px;border:0;background:transparent;color:#55584f;text-align:left;font:8px var(--mono)}
 .diff-filter :focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 .diff-provenance{display:flex;align-items:center;gap:12px;min-width:0;padding:0 18px;background:#e3e6d9;border-bottom:1px solid var(--line);font:8px var(--mono);white-space:nowrap}
-.diff-provenance[data-source=staged],.diff-provenance[data-source=unstaged],.diff-provenance[data-source=untracked]{background:#f4e4b9}
+.diff-provenance[data-source=local],.diff-provenance[data-source=staged],.diff-provenance[data-source=unstaged],.diff-provenance[data-source=untracked]{background:#f4e4b9}
 .diff-provenance b{text-transform:uppercase;letter-spacing:.04em}
 #diff-captured{margin-left:auto;color:#65685f}
 #live-update{min-width:0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 5px;border:1px solid #a4ad90;border-radius:2px;background:#f4f6e8;color:#426336;font:7px var(--mono)}

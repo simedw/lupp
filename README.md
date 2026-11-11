@@ -21,7 +21,7 @@ Open **SET**, choose Codex or Claude, and add an OpenAI API key for transcriptio
 
 Use **⌘K** (Ctrl+K on Linux) to find changed files or search code in the displayed diff. Arrow keys navigate; Enter opens a match.
 
-**Show changes** defaults to committed branch changes. Choose Staged, Unstaged, or Untracked to review local work separately. Search and line totals follow that view. Local edits refresh automatically, keeping your place and showing an Updated indicator. Updates wait while you're speaking, searching, or the window is hidden. Lupp uses filesystem notifications, with a 30-second fallback if watching is unavailable. Notes keep their original code context; changing branch or HEAD requires reopening the repository.
+**Show changes** opens on committed branch changes, or on **Local** when the branch has none. Local shows everything uncommitted in one view; choose Staged, Unstaged, or Untracked to review those separately. Search and line totals follow that view. Local edits refresh automatically, keeping your place and showing an Updated indicator. Updates wait while you're speaking, searching, or the window is hidden. Lupp uses filesystem notifications, with a 30-second fallback if watching is unavailable. Notes keep their original code context. Committing keeps the review open against the new HEAD; checking out another branch ends the session and loads that branch's changes and notes.
 
 Check a file in the sidebar when you're happy with it. Checks are saved per branch and change view, and changed diffs become unchecked on refresh. Space toggles the focused file's check; Enter opens it. Checking a file doesn't dismiss its recommended actions.
 
