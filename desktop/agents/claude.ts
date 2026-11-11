@@ -4,7 +4,8 @@ import {
   findingSchema,
   parseFinding,
   reviewPrompt,
-  type AgentAdapter,
+  type ImplementingAdapter,
+  type ImplementEvent,
   type AgentEvent,
   type AgentSession,
   type AgentUsage,
@@ -15,7 +16,7 @@ type ClaudeAdapterOptions = { apiKey?: string };
 const { version } = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8"));
 const clientApp = `lupp/${version}`;
 
-export class ClaudeAdapter implements AgentAdapter {
+export class ClaudeAdapter implements ImplementingAdapter {
   readonly id = "claude" as const;
   readonly name = "Claude";
 
@@ -34,6 +35,48 @@ export class ClaudeAdapter implements AgentAdapter {
   async createSession(repository: string): Promise<AgentSession> {
     return new ClaudeSession(repository, this.options.apiKey);
   }
+
+  async *implement(repository: string, brief: string): AsyncIterable<ImplementEvent> {
+    yield { type: "progress", detail: "Starting Claude" };
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    let result: SDKResultMessage | null = null;
+    // File tools only: edits are accepted inside the checkout, with no shell or network.
+    for await (const message of query({
+      prompt: brief,
+      options: {
+        cwd: repository,
+        env: agentEnv(this.options.apiKey),
+        systemPrompt: {
+          type: "preset",
+          preset: "claude_code",
+          append: "You are implementing code-review actions the reviewer approved. Make the smallest change that satisfies each action."
+        },
+        settingSources: ["project"],
+        tools: ["Read", "Grep", "Glob", "Edit", "Write"],
+        allowedTools: ["Read", "Grep", "Glob", "Edit", "Write"],
+        disallowedTools: ["Bash", "NotebookEdit", "WebFetch", "WebSearch"],
+        permissionMode: "acceptEdits",
+        maxTurns: 40
+      }
+    })) {
+      if (message.type === "assistant") {
+        const edit = message.message.content.find((block) => block.type === "tool_use" && (block.name === "Edit" || block.name === "Write"));
+        if (edit) yield { type: "progress", detail: "Editing files" };
+        else if (message.message.content.some((block) => block.type === "tool_use")) yield { type: "progress", detail: "Reading code" };
+      }
+      if (message.type === "result") result = message;
+    }
+    if (!result) throw new Error("Claude returned no result");
+    if (result.subtype !== "success") throw new Error(result.errors.join("; ") || `Claude could not apply the action (${result.subtype})`);
+    if (result.is_error) throw new Error(result.result || "Claude could not apply the action");
+    yield { type: "completed", summary: result.result };
+  }
+}
+
+function agentEnv(apiKey?: string) {
+  return apiKey
+    ? { ...process.env, ANTHROPIC_API_KEY: apiKey, CLAUDE_AGENT_SDK_CLIENT_APP: clientApp }
+    : { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: clientApp };
 }
 
 class ClaudeSession implements AgentSession {
@@ -45,9 +88,7 @@ class ClaudeSession implements AgentSession {
     yield { type: "progress", detail: this.sessionId ? "Continuing Claude review session" : "Starting Claude Agent SDK" };
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     let result: SDKResultMessage | null = null;
-    const env = this.apiKey
-      ? { ...process.env, ANTHROPIC_API_KEY: this.apiKey, CLAUDE_AGENT_SDK_CLIENT_APP: clientApp }
-      : { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: clientApp };
+    const env = agentEnv(this.apiKey);
 
     for await (const message of query({
       prompt: reviewPrompt(observation),

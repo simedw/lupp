@@ -7,14 +7,14 @@ import { safeSegmentId } from "./lib.js";
 import { AgentReviewQueue, type AnalysisUpdate } from "./agent-queue.js";
 import { CodexAdapter } from "./agents/codex.js";
 import { ClaudeAdapter } from "./agents/claude.js";
-import type { AgentAdapter, AgentProviderId, ReviewObservation } from "./agents/types.js";
+import type { ActionState, AgentProviderId, ImplementingAdapter, ReviewObservation } from "./agents/types.js";
 import { resolveCodexExecutable } from "./codex-path.js";
 import { loadReview, saveReview } from "./review-store.js";
 import { keySettings, unlockSecret } from "./secrets.js";
 import type { DiffSnapshot, DiffSource, ReviewedFile, ReviewMetadata, SettingsInput } from "./types.js";
 import { updateReviewedFiles } from "./file-review.js";
 import { isDiffSource } from "./diff-source.js";
-import { collectActions, formatActionBrief, setActionDismissed, type ActionSelection } from "./actions.js";
+import { collectActions, formatActionBrief, formatImplementBrief, recommendedActions, actionKey, setActionDismissed, type ActionSelection } from "./actions.js";
 import { watchRepository } from "./repository-watcher.js";
 
 type Config = {
@@ -37,7 +37,9 @@ let mainWindow: BrowserWindow | null = null;
 let activeSession: ActiveSession | null = null;
 let activeReview: ActiveReview | null = null;
 let queue: AgentReviewQueue;
-let adapters: Record<AgentProviderId, AgentAdapter>;
+let adapters: Record<AgentProviderId, ImplementingAdapter>;
+// One agent edits the checkout at a time.
+let applying = Promise.resolve();
 let codexPath: string | null = null;
 let codexError: string | null = null;
 let reviewWrite = Promise.resolve();
@@ -86,7 +88,7 @@ async function getOpenAiApiKey() {
   return secret.value;
 }
 
-async function createAdapters(config: Config): Promise<Record<AgentProviderId, AgentAdapter>> {
+async function createAdapters(config: Config): Promise<Record<AgentProviderId, ImplementingAdapter>> {
   const secret = unlockSecret(safeStorage, config.anthropicApiKey, "Anthropic key");
   return {
     codex: new CodexAdapter({ codexPath, codexError }),
@@ -96,7 +98,8 @@ async function createAdapters(config: Config): Promise<Record<AgentProviderId, A
       id: "claude",
       name: "Claude",
       async probe() { return { provider: "claude", name: "Claude", available: false, detail: secret.error! }; },
-      async createSession() { throw new Error(secret.error!); }
+      async createSession() { throw new Error(secret.error!); },
+      async *implement() { throw new Error(secret.error!); }
     } : new ClaudeAdapter({ apiKey: secret.value || undefined })
   };
 }
@@ -126,6 +129,12 @@ async function loadRepository(repository: string, requestedBaseRef?: string) {
   await queue.setRepository(metadata.repository, true);
   const generation = ++watcherGeneration;
   repositoryWatcher?.close();
+  // A fix that was running when the app closed never reported back.
+  for (const observation of review.observations) {
+    for (const state of Object.values(observation.actionStates || {})) {
+      if (state.status === "applying") Object.assign(state, { status: "failed", detail: "Interrupted when Lupp closed. Check the diff before trying again." });
+    }
+  }
   activeReview = { metadata: reviewMetadata, observations: review.observations, reviewedFiles: review.reviewedFiles };
   diffSnapshots.clear();
   diffSnapshots.set(diff.diffSource, diff);
@@ -319,8 +328,9 @@ ipcMain.handle("segment:transcribe", async (_event, payload: { id: string; wavBa
   return { status: "transcribed", transcript: String(result.text || "").trim(), audioPath };
 });
 
+// Typed notes need no microphone session, only an open repository.
 ipcMain.handle("analysis:enqueue", async (_event, observation: ReviewObservation) => {
-  if (!activeSession || !activeReview) throw new Error("Start a review session first");
+  if (!activeReview) throw new Error("Open a repository first");
   const clean = { ...observation, id: safeSegmentId(observation.id), provider: queue.provider };
   const existing = activeReview.observations.findIndex((item) => item.id === clean.id);
   if (existing === -1) activeReview.observations.push(clean);
@@ -345,8 +355,72 @@ ipcMain.handle("observation:delete", async (_event, idValue: string) => {
   const id = safeSegmentId(idValue);
   activeReview.observations = activeReview.observations.filter((item) => item.id !== id);
   if (activeSession) activeSession.observations = activeReview.observations;
+  queue.cancel(id);
   await persistActiveReview();
   return { status: "deleted" };
+});
+
+function findObservation(idValue: unknown) {
+  if (!activeReview) throw new Error("Open a repository first");
+  const id = safeSegmentId(idValue);
+  const observation = activeReview.observations.find((item) => item.id === id);
+  if (!observation) throw new Error("This note no longer exists");
+  return observation;
+}
+
+// Investigate a saved note again: after a failure, an interrupted session, an
+// edited transcript, or a reply to its finding.
+async function investigateAgain(observation: ReviewObservation) {
+  if (queue.has(observation.id)) throw new Error("This note is already being investigated");
+  if (!observation.transcript.trim()) throw new Error("Write what you want investigated first");
+  observation.provider = queue.provider;
+  await persistActiveReview();
+  queue.enqueue(observation);
+  return { status: "queued" as const, provider: queue.provider };
+}
+
+ipcMain.handle("analysis:rerun", async (_event, id: string) => investigateAgain(findObservation(id)));
+
+ipcMain.handle("analysis:reply", async (_event, payload: { id: string; text: string }) => {
+  const observation = findObservation(payload?.id);
+  const text = String(payload?.text || "").trim();
+  if (!text) throw new Error("Write a reply first");
+  if (!observation.finding) throw new Error("There is no finding to reply to yet");
+  if (queue.has(observation.id)) throw new Error("This note is already being investigated");
+  observation.replies = [...(observation.replies || []), { text, at: new Date().toISOString() }];
+  return { ...await investigateAgain(observation), replies: observation.replies };
+});
+
+ipcMain.handle("action:apply", async (_event, selection: ActionSelection) => {
+  if (!selection || typeof selection.actionKey !== "string") throw new Error("Invalid action selection");
+  const observation = findObservation(selection.observationId);
+  const review = activeReview!;
+  const key = selection.actionKey;
+  if (!recommendedActions(observation).some((action) => actionKey(action) === key)) throw new Error("This action is no longer available");
+  if (observation.actionStates?.[key]?.status === "applying") throw new Error("This action is already being applied");
+  const adapter = adapters[queue.provider];
+  const brief = formatImplementBrief(review.metadata, review.observations, { observationId: observation.id, actionKey: key });
+  const report = (state: ActionState, persist = true) => {
+    observation.actionStates = { ...observation.actionStates, [key]: state };
+    // The checkout may have moved to another branch's review while this ran.
+    if (activeReview !== review) return;
+    if (persist) persistActiveReview().catch((error) => console.error(`[review-store] ${error.message}`));
+    mainWindow?.webContents.send("action:update", { observationId: observation.id, actionKey: key, state });
+  };
+  report({ status: "applying", detail: "Waiting for the agent" });
+  applying = applying.then(async () => {
+    try {
+      let summary = "";
+      for await (const event of adapter.implement(review.metadata.repository, brief)) {
+        if (event.type === "progress") report({ status: "applying", detail: event.detail }, false);
+        else summary = event.summary;
+      }
+      report({ status: "applied", detail: summary.trim().slice(0, 1200) || `${adapter.name} finished.` });
+    } catch (error) {
+      report({ status: "failed", detail: error instanceof Error ? error.message : String(error) });
+    }
+  });
+  return { state: observation.actionStates![key] };
 });
 
 ipcMain.handle("action:dismiss", async (_event, payload: ActionSelection & { dismissed: boolean }) => {

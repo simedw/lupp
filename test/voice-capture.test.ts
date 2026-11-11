@@ -62,3 +62,47 @@ test("mute and stop flush immediately without duplicating the first frame", asyn
   await voice.stop();
   assert.equal(segments.length, 2);
 });
+
+test("holding to talk records while muted and sends on release, without waiting for silence", () => {
+  const { voice, feed, segments, starts } = capture();
+  voice.setMuted(true);
+  feed(1500, .1); // Muted: nothing is captured.
+  assert.equal(starts.length, 0);
+  voice.hold();
+  assert.equal(starts.length, 1);
+  feed(300, .1);
+  feed(2500); // A long thinking pause must not end a held segment.
+  feed(300, .1);
+  assert.equal(segments.length, 0);
+  voice.release();
+  assert.equal(segments.length, 1);
+  assert.equal(segments[0].durationMs, 3100);
+  feed(1500, .1); // Released: muted again.
+  assert.equal(starts.length, 1);
+});
+
+test("a brief hold still sends, a tap or a cancelled recording does not", () => {
+  const { voice, feed, segments, discarded } = capture();
+  voice.setMuted(true);
+  voice.hold(); feed(500, .1); voice.release();
+  assert.equal(segments.length, 1);
+  voice.hold(); feed(100, .1); voice.release();
+  assert.equal(segments.length, 1);
+  assert.deepEqual(discarded, [100]);
+  voice.hold(); feed(3000, .1); voice.cancel();
+  assert.equal(segments.length, 1);
+  assert.deepEqual(discarded, [100, 0]);
+  voice.setMuted(false);
+  feed(1500, .1); voice.cancel(); feed(2500);
+  assert.equal(segments.length, 1, "Esc also discards an open-mic segment");
+});
+
+test("holding on an open mic sends the current segment immediately on release", () => {
+  const { voice, feed, segments } = capture();
+  feed(1200, .1);
+  voice.hold();
+  feed(400, .1);
+  voice.release();
+  assert.equal(segments.length, 1);
+  assert.equal(segments[0].durationMs, 1600);
+});

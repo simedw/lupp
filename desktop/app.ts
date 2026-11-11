@@ -36,6 +36,9 @@ type State = {
   changeVersion: number;
   autoBlocked: boolean;
   watchMode: "native" | "fallback";
+  // The note whose finding the next spoken segment answers, if any.
+  replyTo: string | null;
+  talking: boolean;
   attentionTimer?: ReturnType<typeof setInterval>;
   clockTimer?: ReturnType<typeof setInterval>;
 };
@@ -61,7 +64,9 @@ const state: State = {
   dirtySources: new Set(),
   changeVersion: 0,
   autoBlocked: false,
-  watchMode: "native"
+  watchMode: "native",
+  replyTo: null,
+  talking: false
 };
 
 type Controls = {
@@ -77,6 +82,8 @@ type Controls = {
   "#diff-refresh": HTMLButtonElement;
   "#copy-actions": HTMLButtonElement;
   "#live-update": HTMLButtonElement;
+  "#note-form": HTMLFormElement;
+  "#note-input": HTMLTextAreaElement;
 };
 function $<K extends keyof Controls>(selector: K): Controls[K];
 function $(selector: string): HTMLElement;
@@ -112,19 +119,23 @@ const voice = new VoiceCapture({
   onSpeechStart: ({ startedAt }) => {
     document.body.classList.add("speaking");
     state.speechAttention = state.attentionRing.filter((sample) => sample.t >= startedAt - 750);
-    $("#attention-label").textContent = "Speech segment open";
+    $("#attention-label").textContent = state.replyTo ? `Recording reply to ${state.replyTo} · Esc discards` : "Recording · Esc discards";
   },
   onSpeechEnd: (segment) => {
     document.body.classList.remove("speaking");
-    $("#attention-label").textContent = state.muted ? "Microphone muted" : "Listening for speech";
-    processSegment(segment, [...state.speechAttention]);
+    const replyTo = state.replyTo;
+    state.replyTo = null;
+    renderMic();
+    if (replyTo) void processReply(segment, replyTo);
+    else void processSegment(segment, [...state.speechAttention]);
     state.speechAttention = [];
     scheduleAutoRefresh();
   },
+  // Coughs and clicks are dropped quietly; only a deliberate Esc is announced.
   onDiscard: () => {
     document.body.classList.remove("speaking");
     state.speechAttention = [];
-    toast("Short sound discarded");
+    renderMic();
     scheduleAutoRefresh();
   }
 });
@@ -154,7 +165,8 @@ function applyRepository(repository: Repository) {
   state.snapshots.set(source, { files: repository.files, baseSha: repository.baseSha || "", headSha: repository.headSha || "", diffSource: source, snapshotId: repository.snapshotId || "", capturedAt: repository.capturedAt || new Date().toISOString() });
   searchPalette.setFiles(repository.files);
   fileTree.setFiles(repository.files);
-  state.activeFile = repository.files[0] || null;
+  // Start at the top of the tree, so J walks the files in the order shown.
+  state.activeFile = fileTree.neighbor(1);
   state.observations = (repository.review?.observations || []).map((observation) => {
     if (["transcribing", "queued", "investigating"].includes(observation.status || "")) {
       return { ...observation, status: "saved", detail: "Restored from an earlier session" };
@@ -163,6 +175,7 @@ function applyRepository(repository: Repository) {
   });
   state.nextObservation = Math.max(0, ...state.observations.map((item) => Number(item.id?.slice(1)) || 0)) + 1;
   state.selectedObservation = null;
+  state.replyTo = null;
   $("#repo-name").textContent = repository.name;
   $("#repo-meta").textContent = repository.repository;
   $("#base-ref").textContent = repository.baseRef;
@@ -241,6 +254,7 @@ async function switchDiff(source: DiffSource, refresh = false, automatic = false
     state.activeFile = snapshot.files.find((file) => file.path === activePath) || (preserve && oldActive ? null : snapshot.files[0] || null);
     searchPalette.setFiles(snapshot.files);
     fileTree.setFiles(snapshot.files, preserve, preserve ? updated : []);
+    if (!preserve && !snapshot.files.some((file) => file.path === activePath)) state.activeFile = fileTree.neighbor(1);
     renderDiffSummary();
     renderFiles(!preserve);
     if (!preserve || !oldActive?.reviewId || oldActive.reviewId !== state.activeFile?.reviewId) {
@@ -450,19 +464,19 @@ async function toggleReview() {
     state.agentProvider = session.agentProvider;
     await voice.start();
     state.reviewing = true;
-    state.muted = false;
+    // Start the way the last review was left: open mic, or muted for hold-to-talk.
+    state.muted = savedMuted();
+    voice.setMuted(state.muted);
     state.clockOrigin = performance.now();
     state.attentionRing = [];
     document.body.classList.add("reviewing");
     $("#review-toggle").classList.add("active");
     $("#review-toggle span:last-child").textContent = "End review";
     $("#mute").disabled = false;
-    $("#mute").classList.add("live");
-    $("#mute span:last-child").textContent = "LIVE";
-    $("#attention-label").textContent = "Listening for speech";
+    renderMic();
     state.attentionTimer = setInterval(sampleAttention, 250);
     state.clockTimer = setInterval(() => { $("#clock").textContent = formatClock(performance.now() - state.clockOrigin); }, 250);
-    toast("Review session started — microphone live");
+    toast(state.muted ? "Review started — muted, hold V to talk" : "Review started — microphone live");
   } catch (error) { toast(`Could not start review: ${errorMessage(error)}`, "error"); }
 }
 
@@ -470,26 +484,58 @@ async function stopReview() {
   state.reviewing = false;
   clearInterval(state.attentionTimer);
   clearInterval(state.clockTimer);
+  state.talking = false;
   await voice.stop();
   state.muted = true;
+  state.replyTo = null;
   document.body.classList.remove("reviewing", "speaking");
   $("#review-toggle").classList.remove("active");
   $("#review-toggle span:last-child").textContent = "Start review";
   $("#mute").disabled = true;
-  $("#mute").classList.remove("live");
-  $("#mute span:last-child").textContent = "MUTED";
-  $("#attention-label").textContent = "Session complete";
+  renderMic();
+  renderObservations();
   toast("Review session ended; background investigations continue");
   renderDiffSummary();
+}
+
+function savedMuted() {
+  try { return localStorage.getItem("lupp.muted") === "1"; } catch { return false; }
+}
+
+function renderMic() {
+  const live = state.reviewing && !state.muted;
+  $("#mute").classList.toggle("live", live);
+  $("#mute span:last-child").textContent = live ? "LIVE" : "MUTED";
+  if (voice.speaking) return;
+  $("#attention-label").textContent = !state.reviewing ? "Session idle"
+    : state.replyTo ? `Replying to ${state.replyTo} — ${state.muted ? "hold V and speak" : "speak now"}`
+    : state.muted ? "Muted — hold V to talk" : "Listening for speech";
 }
 
 function toggleMute() {
   if (!state.reviewing) return;
   state.muted = !state.muted;
   voice.setMuted(state.muted);
-  $("#mute").classList.toggle("live", !state.muted);
-  $("#mute span:last-child").textContent = state.muted ? "MUTED" : "LIVE";
-  $("#attention-label").textContent = state.muted ? "Microphone muted" : "Listening for speech";
+  try { localStorage.setItem("lupp.muted", state.muted ? "1" : "0"); } catch {}
+  renderMic();
+}
+
+// Push-to-talk: hold V to record whatever the mute state, release to send.
+function startTalking() {
+  if (state.talking) return;
+  if (!state.reviewing) { toast("Start a review to talk, or press N to type a note"); return; }
+  state.talking = true;
+  voice.hold();
+}
+function stopTalking() {
+  if (!state.talking) return;
+  state.talking = false;
+  voice.release();
+}
+function discardSpeech() {
+  state.talking = false;
+  voice.cancel();
+  toast("Recording discarded");
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer) {
@@ -504,11 +550,11 @@ function arrayBufferToBase64(buffer: ArrayBuffer) {
   return btoa(binary);
 }
 
-async function processSegment(segment: SpeechSegment, attention: AttentionSample[]) {
-  const id = `n${state.nextObservation++}`;
-  const wav = encodeMonoWav(segment.frames, segment.sampleRate);
-  const blob = new Blob([wav], { type: "audio/wav" });
-  const spans = collapseAttention(attention).map((span) => {
+function agentName() { return state.agentProvider === "claude" ? "Claude" : "Codex"; }
+
+// Attach the code each span showed when it was captured.
+function captureSpans(attention: AttentionSample[]) {
+  return collapseAttention(attention).map((span) => {
     const snapshot = state.snapshots.get(span.source || "branch");
     const file = snapshot && snapshot.snapshotId === span.snapshotId ? snapshot.files.find((file) => file.path === span.file) : null;
     const excerpt = file?.hunks.flatMap((hunk) => hunk.lines).filter((line) => {
@@ -517,6 +563,13 @@ async function processSegment(segment: SpeechSegment, attention: AttentionSample
     }).slice(0, 160).map((line) => `${line.oldLine ?? "-"}/${line.newLine ?? "-"} ${line.type}: ${line.text}`).join("\n").slice(0, 16000);
     return { ...span, excerpt };
   });
+}
+
+async function processSegment(segment: SpeechSegment, attention: AttentionSample[]) {
+  const id = `n${state.nextObservation++}`;
+  const wav = encodeMonoWav(segment.frames, segment.sampleRate);
+  const blob = new Blob([wav], { type: "audio/wav" });
+  const spans = captureSpans(attention);
   const observation: ReviewObservation = { id, transcript: "", status: "transcribing", detail: "Sending speech to OpenAI", spans, audioUrl: URL.createObjectURL(blob), durationMs: segment.durationMs, finding: null };
   state.observations.push(observation);
   renderObservations();
@@ -527,7 +580,7 @@ async function processSegment(segment: SpeechSegment, attention: AttentionSample
     observation.transcript = result.transcript;
     observation.audioPath = result.audioPath;
     observation.status = "queued";
-    observation.detail = `Waiting for ${state.agentProvider === "claude" ? "Claude" : "Codex"}`;
+    observation.detail = `Waiting for ${agentName()}`;
     renderObservations();
     await window.reviewAPI.enqueueAnalysis({ id, transcript: observation.transcript, spans, durationMs: observation.durationMs, audioPath: observation.audioPath });
   } catch (error) {
@@ -535,6 +588,60 @@ async function processSegment(segment: SpeechSegment, attention: AttentionSample
     observation.detail = errorMessage(error);
     renderObservations();
   }
+}
+
+// A typed note is anchored to the code on screen, and needs no microphone session.
+async function addTypedNote(text: string) {
+  if (!state.repository) return;
+  const sample = attentionSnapshot();
+  const spans = captureSpans(sample ? [sample] : []);
+  const observation: ReviewObservation = { id: `n${state.nextObservation++}`, transcript: text, status: "queued", detail: `Waiting for ${agentName()}`, spans, finding: null };
+  state.observations.push(observation);
+  renderObservations();
+  markAttention(spans);
+  document.querySelector(".observation:last-child")?.scrollIntoView({ block: "nearest" });
+  try { await window.reviewAPI.enqueueAnalysis({ id: observation.id, transcript: text, spans }); }
+  catch (error) {
+    observation.status = "failed";
+    observation.detail = errorMessage(error);
+    renderObservations();
+  }
+}
+
+async function investigateAgain(observation: ReviewObservation) {
+  try { await window.reviewAPI.rerunAnalysis(observation.id); }
+  catch (error) { toast(errorMessage(error), "error"); }
+}
+
+async function sendReply(observation: ReviewObservation, text: string) {
+  try {
+    const result = await window.reviewAPI.replyToFinding({ id: observation.id, text });
+    observation.replies = result.replies;
+    renderObservations();
+    return true;
+  } catch (error) { toast(errorMessage(error), "error"); return false; }
+}
+
+// A spoken reply is transcribed like a note, then sent to the finding it answers.
+async function processReply(segment: SpeechSegment, replyTo: string) {
+  const observation = state.observations.find((item) => item.id === replyTo);
+  if (!observation) return;
+  toast(`Transcribing your reply to ${replyTo}`);
+  try {
+    const wav = encodeMonoWav(segment.frames, segment.sampleRate);
+    const result = await window.reviewAPI.saveAndTranscribe({ id: `n${state.nextObservation++}`, wavBase64: arrayBufferToBase64(wav) });
+    if (result.status === "needs-key") throw new Error("Add an OpenAI API key in settings");
+    if (!result.transcript) throw new Error("Nothing was heard");
+    await sendReply(observation, result.transcript);
+  } catch (error) { toast(`Reply not sent: ${errorMessage(error)}`, "error"); }
+}
+
+async function applyAction(observation: ReviewObservation, key: string) {
+  try {
+    const { state: actionState } = await window.reviewAPI.applyAction({ observationId: observation.id, actionKey: key });
+    observation.actionStates = { ...observation.actionStates, [key]: actionState };
+    renderObservations();
+  } catch (error) { toast(`Could not start the fix: ${errorMessage(error)}`, "error"); }
 }
 
 type CodeLocation = { file: string; startLine: number; endLine: number; source?: DiffSource; snapshotId?: string; side?: "LEFT" | "RIGHT" };
@@ -550,7 +657,9 @@ function markAttention(spans: CodeLocation[]) {
   }
 }
 
-const cardResults = new WeakMap<HTMLElement, Pick<ReviewObservation, "finding" | "usage" | "dismissedActionKeys" | "status">>();
+type CardResult = Pick<ReviewObservation, "finding" | "usage" | "dismissedActionKeys" | "status" | "replies" | "actionStates"> & { replyTarget: boolean; reviewing: boolean };
+const cardResults = new WeakMap<HTMLElement, CardResult>();
+const inFlight = (observation: ReviewObservation) => ["transcribing", "queued", "investigating"].includes(observation.status || "");
 const updateObservationList = createObservationList<ReviewObservation, HTMLElement>($("#observation-list"), {
   createEmpty() {
     const empty = el("div", "ledger-empty");
@@ -562,7 +671,7 @@ const updateObservationList = createObservationList<ReviewObservation, HTMLEleme
     card.tabIndex = 0;
     card.title = "Jump to where this observation was captured";
     card.onclick = (event) => {
-      if (event.target instanceof Element && event.target.closest("button, textarea, audio")) return;
+      if (event.target instanceof Element && event.target.closest("button, textarea, audio, input")) return;
       jumpToObservation(observation, card);
     };
     card.onkeydown = (event) => {
@@ -584,7 +693,10 @@ const updateObservationList = createObservationList<ReviewObservation, HTMLEleme
         renderObservations();
       } catch (error) { toast(`Could not delete observation: ${errorMessage(error)}`, "error"); }
     };
-    top.append(remove); card.append(top);
+    const rerun = el("button", "observation-rerun", "↻");
+    rerun.type = "button";
+    rerun.onclick = () => { void investigateAgain(observation); };
+    top.append(rerun, remove); card.append(top);
     const transcript = el("textarea"); transcript.placeholder = observation.status === "transcribing" ? "Transcribing…" : "No transcript"; transcript.value = observation.transcript;
     transcript.onchange = async () => {
       observation.transcript = transcript.value;
@@ -617,10 +729,24 @@ const updateObservationList = createObservationList<ReviewObservation, HTMLEleme
     if (document.activeElement !== transcript && transcript.value !== observation.transcript) {
       transcript.value = observation.transcript;
     }
+    const rerun = card.querySelector<HTMLButtonElement>(".observation-rerun")!;
+    rerun.disabled = inFlight(observation);
+    rerun.title = observation.status === "failed" ? "Try this investigation again" : observation.finding ? "Investigate again, using the transcript as it is now" : "Investigate this note";
+    rerun.classList.toggle("wanted", observation.status === "failed" || observation.status === "saved");
     const previous = cardResults.get(card);
-    if (previous?.finding !== observation.finding || previous?.dismissedActionKeys !== observation.dismissedActionKeys || previous?.status !== observation.status) {
+    const next: CardResult = { finding: observation.finding, usage: observation.usage, dismissedActionKeys: observation.dismissedActionKeys, status: observation.status, replies: observation.replies, actionStates: observation.actionStates, replyTarget: state.replyTo === observation.id, reviewing: state.reviewing };
+    if (!previous || (["finding", "dismissedActionKeys", "status", "replies", "actionStates", "replyTarget", "reviewing"] as const).some((field) => previous[field] !== next[field])) {
+      // Progress on one action must not wipe a reply being typed in the same card.
+      const draft = card.querySelector<HTMLInputElement>(".reply-form input");
+      const typing = draft && document.activeElement === draft;
       card.querySelector(".finding")?.remove();
-      if (observation.finding) card.append(renderFinding(observation));
+      if (observation.finding) {
+        const box = renderFinding(observation);
+        card.insertBefore(box, card.querySelector(".usage-strip"));
+        const input = box.querySelector<HTMLInputElement>(".reply-form input");
+        if (input && draft?.value) input.value = draft.value;
+        if (input && typing && !input.disabled) input.focus({ preventScroll: true });
+      }
     }
     card.classList.toggle("has-actions", collectActions([observation]).length > 0);
     card.classList.toggle("needs-decision", observation.finding?.decision === "needs-decision");
@@ -628,7 +754,7 @@ const updateObservationList = createObservationList<ReviewObservation, HTMLEleme
       card.querySelector(".usage-strip")?.remove();
       if (observation.usage) card.append(renderUsage(observation.usage));
     }
-    cardResults.set(card, { finding: observation.finding, usage: observation.usage, dismissedActionKeys: observation.dismissedActionKeys, status: observation.status });
+    cardResults.set(card, next);
   }
 });
 
@@ -660,7 +786,10 @@ function renderFinding(observation: ReviewObservation) {
     const dismissed = observation.dismissedActionKeys?.includes(key) || false;
     const block = el("section", `recommended-action${dismissed ? " dismissed" : ""}`);
     block.dataset.actionKey = key;
-    block.append(el("span", "action-kind", `${dismissed ? "Dismissed" : "Recommended action"} · ${action.kind}`), el("h3", "", action.title), el("p", "action-rationale", action.rationale));
+    const applyState = observation.actionStates?.[key];
+    if (applyState) block.classList.add(applyState.status);
+    const heading = dismissed ? "Dismissed" : applyState?.status === "applied" ? "Applied" : "Recommended action";
+    block.append(el("span", "action-kind", `${heading} · ${action.kind}`), el("h3", "", action.title), el("p", "action-rationale", action.rationale));
     const locations = el("div", "action-locations");
     for (const location of action.locations) locations.append(el("div", "", `${location.file}:${location.startLine}–${location.endLine}`));
     block.append(locations);
@@ -682,10 +811,48 @@ function renderFinding(observation: ReviewObservation) {
         replacement?.querySelector<HTMLButtonElement>(".action-dismiss")?.focus({ preventScroll: true });
       } catch (error) { dismiss.disabled = false; toast(`Could not save action: ${errorMessage(error)}`, "error"); }
     };
-    buttons.append(copy, dismiss);
+    const fix = el("button", "action-fix", applyState?.status === "applying" ? "Fixing…" : applyState?.status === "applied" ? "Fix again" : applyState?.status === "failed" ? "Try fix again" : `Fix with ${agentName()}`);
+    fix.type = "button";
+    fix.disabled = dismissed || applyState?.status === "applying";
+    fix.title = `Let ${agentName()} edit files in this checkout to make this change. Nothing is committed; the result shows up in the Local view.`;
+    fix.onclick = () => { fix.disabled = true; void applyAction(observation, key); };
+    buttons.append(fix, copy, dismiss);
     block.append(buttons);
+    if (applyState?.detail) block.append(el("p", `action-result ${applyState.status}`, applyState.detail));
     box.append(block);
   }
+  for (const reply of observation.replies || []) box.append(el("p", "reply", reply.text));
+  const busy = inFlight(observation);
+  const form = el("form", "reply-form");
+  const input = el("input");
+  input.type = "text";
+  input.placeholder = busy ? "Investigating your reply…" : finding.decision === "needs-decision" ? "Give your decision…" : "Reply or ask a follow-up…";
+  input.disabled = busy;
+  const speak = el("button", `reply-voice${state.replyTo === observation.id ? " armed" : ""}`, state.replyTo === observation.id ? "● Cancel" : "● Speak");
+  speak.type = "button";
+  speak.disabled = busy || !state.reviewing;
+  speak.title = state.reviewing ? "Answer out loud: your next spoken segment becomes the reply" : "Start a review to reply by voice";
+  speak.onclick = () => {
+    state.replyTo = state.replyTo === observation.id ? null : observation.id;
+    renderMic();
+    renderObservations();
+  };
+  const send = el("button", "", "Send");
+  send.type = "submit";
+  send.disabled = busy;
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    // Clear first: a successful send re-renders the card and would carry the text over as a draft.
+    input.value = "";
+    input.disabled = send.disabled = true;
+    if (await sendReply(observation, text)) return;
+    input.value = text;
+    input.disabled = send.disabled = false;
+  };
+  form.append(input, speak, send);
+  box.append(form);
   return box;
 }
 
@@ -757,11 +924,7 @@ function selectSearchResult(result: SearchResult) {
   });
 }
 
-const fileTree = new FileTreeView($("#file-list"), (file) => {
-  state.activeFile = file;
-  renderFiles();
-  renderDiff();
-}, (file, reviewed) => { void toggleFileReview(file, reviewed); });
+const fileTree = new FileTreeView($("#file-list"), openFile, (file, reviewed) => { void toggleFileReview(file, reviewed); });
 
 const searchPalette = new SearchPalette({
   trigger: $("#file-search"), dialog: $("#search-dialog"), input: $("#search-input"),
@@ -797,6 +960,60 @@ $("#settings-form").onsubmit = async (event) => {
     $("#key-status").textContent = errorMessage(error);
   }
 };
+
+window.reviewAPI.onActionUpdate((update) => {
+  const observation = state.observations.find((item) => item.id === update.observationId);
+  if (!observation) return;
+  observation.actionStates = { ...observation.actionStates, [update.actionKey]: update.state };
+  renderObservations();
+  if (update.state.status === "applied") toast(`${observation.id}: fix applied — review it in the Local view`);
+  if (update.state.status === "failed") toast(`${observation.id}: fix failed — ${update.state.detail || "see the note"}`, "error");
+});
+
+$("#note-form").onsubmit = (event) => {
+  event.preventDefault();
+  const text = $("#note-input").value.trim();
+  if (!text) return;
+  $("#note-input").value = "";
+  void addTypedNote(text);
+};
+$("#note-input").onkeydown = (event) => {
+  if (event.isComposing) return;
+  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); $("#note-form").requestSubmit(); }
+  if (event.key === "Escape") $("#note-input").blur();
+};
+
+function openFile(file: DiffFile | null) {
+  if (!file) return;
+  state.activeFile = file;
+  renderFiles();
+  renderDiff();
+}
+
+// Single keys work wherever you aren't typing, so one hand can stay on the
+// keyboard while the other points at code.
+function isTyping(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target instanceof HTMLInputElement) return !["checkbox", "radio", "button"].includes(target.type);
+  return target.isContentEditable || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement;
+}
+document.addEventListener("keydown", (event) => {
+  if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
+  if ($("#search-dialog").open || !$("#settings-modal").classList.contains("hidden")) return;
+  if (event.key === "Escape" && voice.speaking) { event.preventDefault(); discardSpeech(); return; }
+  if (isTyping(event.target) || !state.repository) return;
+  const key = event.key.toLowerCase();
+  if (key === "v") { if (!event.repeat) startTalking(); }
+  else if (event.repeat) return;
+  else if (key === "m") toggleMute();
+  else if (key === "n") $("#note-input").focus();
+  else if (key === "j") openFile(fileTree.neighbor(1));
+  else if (key === "k") openFile(fileTree.neighbor(-1));
+  else return;
+  event.preventDefault();
+});
+document.addEventListener("keyup", (event) => { if (event.key.toLowerCase() === "v") stopTalking(); });
+window.addEventListener("blur", stopTalking);
 
 window.reviewAPI.onAnalysisUpdate((update) => {
   const observation = state.observations.find((item) => item.id === update.id);

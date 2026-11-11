@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { actionKey, collectActions, formatActionBrief, recommendedActions, setActionDismissed } from "../desktop/actions.js";
+import { actionKey, collectActions, formatActionBrief, formatImplementBrief, recommendedActions, setActionDismissed } from "../desktop/actions.js";
 import { findingSchema, parseFinding, reviewPrompt, type Finding, type RecommendedAction, type ReviewObservation } from "../desktop/agents/types.js";
 import { loadReview, saveReview } from "../desktop/review-store.js";
 
@@ -90,4 +90,24 @@ test("dismiss and restore persist, and don't dismiss a different action after re
   assert.throws(() => setActionDismissed(restored, "stale-key", true), /no longer available/);
   note.finding = { ...finding, actions: [{ ...action, title: "Keep the handler but fix routing" }] };
   assert.equal(collectActions([note]).length, 1);
+});
+
+test("applied actions leave the copied brief but can still be sent to the agent again", () => {
+  const applied = { ...observation("n1"), actionStates: { [actionKey(action)]: { status: "applied" as const, detail: "Removed it." } } };
+  const failed = { ...observation("n2"), actionStates: { [actionKey(action)]: { status: "failed" as const } } };
+  assert.deepEqual(collectActions([applied, failed]).map((item) => item.observation.id), ["n2"]);
+  assert.throws(() => formatActionBrief(metadata, [applied]), /No recommended actions/);
+  const brief = formatImplementBrief(metadata, [applied, failed], { observationId: "n1", actionKey: actionKey(action) });
+  assert.match(brief, /Implement the following 1 recommended/);
+  assert.match(brief, /running unattended/);
+  assert.match(brief, /Do not commit/);
+});
+
+test("a reply sends the earlier conclusion and the reviewer's answer back for a new finding", () => {
+  const first = reviewPrompt(observation());
+  assert.doesNotMatch(first, /has since replied/);
+  const replied = reviewPrompt({ ...observation(), finding: { ...finding, decision: "needs-decision", actions: [] }, replies: [{ text: "Keep the fallback", at: "2026-01-01T00:00:00Z" }, { text: "Actually \"remove\" it", at: "2026-01-01T00:01:00Z" }] });
+  assert.match(replied, /concluded \(needs-decision\): "The fallback is unused\."/);
+  assert.match(replied, /- "Keep the fallback"\n- "Actually \\"remove\\" it"/);
+  assert.match(replied, /replaces the previous one/);
 });

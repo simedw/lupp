@@ -1,4 +1,4 @@
-import { buildFileTree, revealFileAncestors, visibleTreeRows, type FileTreeNode, type TreeRow } from "./file-tree.js";
+import { buildFileTree, revealFileAncestors, treeFiles, visibleTreeRows, type FileTreeNode, type TreeRow } from "./file-tree.js";
 import type { DiffFile } from "./types.js";
 
 export class FileTreeView {
@@ -31,6 +31,13 @@ export class FileTreeView {
     this.focused = null;
     this.container.scrollTop = 0;
     this.container.scrollLeft = 0;
+  }
+
+  // The file before or after the active one, in displayed order.
+  neighbor(step: 1 | -1): DiffFile | null {
+    const files = treeFiles(this.nodes);
+    const index = files.findIndex((file) => file.path === this.active);
+    return files[index === -1 ? (step === 1 ? 0 : files.length - 1) : index + step] || null;
   }
 
   select(path: string | null, reveal = true) {

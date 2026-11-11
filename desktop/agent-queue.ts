@@ -15,6 +15,7 @@ export class AgentReviewQueue {
   private session: AgentSession | null = null;
   private repository = "";
   private generation = 0;
+  private current: string | null = null;
 
   constructor(
     private readonly send: (update: AnalysisUpdate) => void,
@@ -40,8 +41,14 @@ export class AgentReviewQueue {
     this.session = null;
     this.pending = [];
     this.running = false;
+    this.current = null;
     await previous?.dispose();
   }
+
+  has(id: string) { return this.current === id || this.pending.some((item) => item.id === id); }
+
+  // A note already with the agent runs to completion; its result is ignored by the caller.
+  cancel(id: string) { this.pending = this.pending.filter((item) => item.id !== id); }
 
   enqueue(observation: ReviewObservation) {
     this.pending.push(observation);
@@ -55,6 +62,7 @@ export class AgentReviewQueue {
     const generation = this.generation;
     while (generation === this.generation && this.pending.length) {
       const observation = this.pending.shift()!;
+      this.current = observation.id;
       try { await this.analyze(observation, generation); }
       catch (error) {
         if (generation !== this.generation) return;
@@ -64,6 +72,8 @@ export class AgentReviewQueue {
           detail: error instanceof Error ? error.message : String(error),
           provider: this.adapter.id
         });
+      } finally {
+        if (generation === this.generation) this.current = null;
       }
     }
     if (generation === this.generation) this.running = false;

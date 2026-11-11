@@ -165,3 +165,30 @@ for (const outcome of ["completed", "error", "creating", "reopened"] as const) {
     assert.equal(sessions, 2, "stale session creation must not replace the current session");
   });
 }
+
+test("a queued note can be cancelled, and a note in flight is reported as busy", async () => {
+  const updates: AnalysisUpdate[] = [];
+  const gate = deferred();
+  const queue = new AgentReviewQueue((update) => updates.push(update), {
+    id: "codex", name: "Test",
+    async probe() { return { provider: "codex", name: "Test", available: true, detail: "" }; },
+    async createSession() {
+      return { async *analyze() { await gate.promise; yield { type: "completed", finding, usage: null }; }, async dispose() {} };
+    }
+  });
+  await queue.setRepository("/repo");
+  queue.enqueue({ id: "n1", transcript: "first", spans: [] });
+  queue.enqueue({ id: "n2", transcript: "second", spans: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(queue.has("n1"), true);
+  assert.equal(queue.has("n2"), true);
+  queue.cancel("n2");
+  assert.equal(queue.has("n2"), false);
+  gate.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(queue.has("n1"), false, "a finished note can be investigated again");
+  assert.deepEqual(updates.filter((update) => update.id === "n2").map((update) => update.status), ["queued"]);
+  queue.enqueue({ id: "n1", transcript: "first, edited", spans: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(updates.filter((update) => update.id === "n1").map((update) => update.status), ["queued", "ready", "queued", "ready"]);
+});

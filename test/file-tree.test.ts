@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildFileTree, revealFileAncestors, visibleTreeRows } from "../desktop/file-tree.js";
+import { buildFileTree, revealFileAncestors, treeFiles, visibleTreeRows } from "../desktop/file-tree.js";
 import type { DiffFile } from "../desktop/types.js";
 
 const file = (path: string, status: DiffFile["status"] = "modified"): DiffFile => ({ path, oldPath: path, status, hunks: [], additions: 2, deletions: 1 });
@@ -43,4 +43,9 @@ test("empty trees and unusual path characters do not add synthetic files", () =>
   const rows = visibleTreeRows(buildFileTree([file(name, "renamed")]), new Set());
   assert.equal(rows.at(-1)?.node.name, "<example> file.ts");
   assert.equal(rows.at(-1)?.node.path, name);
+});
+
+test("next and previous file follow the displayed order, through collapsed folders", () => {
+  const tree = buildFileTree([file("README.md"), file("src/b.ts"), file("src/a.ts"), file("config/app.ts")]);
+  assert.deepEqual(treeFiles(tree).map((item) => item.path), ["config/app.ts", "src/a.ts", "src/b.ts", "README.md"]);
 });

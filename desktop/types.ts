@@ -1,5 +1,5 @@
 import type { AnalysisUpdate } from "./agent-queue.js";
-import type { AgentAvailability, AgentProviderId, ReviewObservation } from "./agents/types.js";
+import type { ActionState, AgentAvailability, AgentProviderId, ReviewObservation } from "./agents/types.js";
 import type { ActionSelection } from "./actions.js";
 
 export type DiffLine = { type: "add" | "delete" | "context" | "meta"; oldLine: number | null; newLine: number | null; text: string };
@@ -24,6 +24,7 @@ export type Settings = {
   availability: AgentAvailability[];
 };
 export type SettingsInput = { agentProvider: AgentProviderId; openaiApiKey: string; anthropicApiKey: string };
+export type ActionUpdate = { observationId: string; actionKey: string; state: ActionState };
 export type ReviewAPI = {
   chooseRepository(): Promise<Repository | null>;
   initialRepository(): Promise<Repository | null>;
@@ -39,6 +40,10 @@ export type ReviewAPI = {
   enqueueAnalysis(observation: ReviewObservation): Promise<{ status: "queued"; provider: AgentProviderId }>;
   updateObservation(observation: { id: string; transcript: string }): Promise<{ status: "saved" }>;
   deleteObservation(id: string): Promise<{ status: "deleted" }>;
+  rerunAnalysis(id: string): Promise<{ status: "queued"; provider: AgentProviderId }>;
+  replyToFinding(payload: { id: string; text: string }): Promise<{ status: "queued"; provider: AgentProviderId; replies: NonNullable<ReviewObservation["replies"]> }>;
+  applyAction(selection: ActionSelection): Promise<{ state: ActionState }>;
+  onActionUpdate(callback: (update: ActionUpdate) => void): () => void;
   dismissAction(selection: ActionSelection & { dismissed: boolean }): Promise<{ dismissedActionKeys: string[] }>;
   copyActions(selection?: ActionSelection): Promise<{ count: number }>;
   onRepositoryChange(callback: (change: RepositoryChange) => void): () => void;

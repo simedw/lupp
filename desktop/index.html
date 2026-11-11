@@ -21,7 +21,7 @@
       </div>
       <div class="transport">
         <button id="settings" class="icon-button" title="Agent and transcription settings">SET</button>
-        <button id="mute" class="mute-button" disabled><span class="mic-glyph">●</span><span>MUTED</span></button>
+        <button id="mute" class="mute-button" disabled title="Mute or unmute the microphone (M). While muted, hold V to talk."><span class="mic-glyph">●</span><span>MUTED</span></button>
         <button id="review-toggle" class="review-button" disabled><span class="review-pulse"></span><span>Start review</span></button>
       </div>
     </header>
@@ -44,12 +44,13 @@
         <div id="diff-provenance" class="diff-provenance" data-source="branch" role="status"><b id="diff-source-label">Branch · committed</b><span id="diff-comparison">Merge base → HEAD</span><span id="diff-captured"></span><button id="live-update" type="button">Watching local edits</button></div>
         <header class="file-heading"><div><span id="file-status">MODIFIED</span><h2 id="file-name">—</h2></div><div class="file-tally"><ins id="file-additions">+0</ins><del id="file-deletions">−0</del></div></header>
         <div id="diff-scroll" class="diff-scroll" tabindex="-1"><div id="diff" class="diff"></div></div>
-        <footer class="attention-strip"><span class="live-dot"></span><b id="attention-label">Session idle</b><div id="level-meter" class="level-meter"><i></i></div><span id="attention-location">No active line</span></footer>
+        <footer class="attention-strip"><span class="live-dot"></span><b id="attention-label">Session idle</b><div id="level-meter" class="level-meter"><i></i></div><span class="key-hints" title="Keyboard shortcuts, available when you aren't typing"><kbd>V</kbd> hold to talk <kbd>M</kbd> mute <kbd>Esc</kbd> discard <kbd>N</kbd> note <kbd>J</kbd><kbd>K</kbd> file</span><span id="attention-location">No active line</span></footer>
       </section>
       <aside class="voice-ledger">
         <header><div><span class="eyebrow">VOICE LEDGER</span><h2>Observations</h2></div><b id="observation-count">0</b></header>
         <div class="action-toolbar"><span id="action-count" role="status" aria-live="polite">0 actions</span><button id="copy-actions" type="button" disabled title="Copy all non-dismissed recommended actions in this review, across all change views">Copy all actions ↗</button></div>
         <div id="observation-list" class="observation-list"><div class="ledger-empty"><span>◌</span><p>Spoken segments will collect here while you review.</p></div></div>
+        <form id="note-form" class="note-form"><textarea id="note-input" rows="2" placeholder="Type a note about the code on screen…" aria-label="Type a note"></textarea><button type="submit" title="Add this note and investigate it (Enter)">Add note ↵</button></form>
       </aside>
     </section>
   </main>
