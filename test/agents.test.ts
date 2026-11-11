@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { AgentReviewQueue, type AnalysisUpdate } from "../desktop/agent-queue.js";
 import { parseFinding, reviewPrompt, type AgentAdapter, type Finding } from "../desktop/agents/types.js";
+import { CodexQuickAnswerer } from "../desktop/agents/codex-quick.js";
+import type { QuickEvent } from "../desktop/agents/types.js";
 
 const finding: Finding = {
   severity: "question",
@@ -191,4 +193,43 @@ test("a queued note can be cancelled, and a note in flight is reported as busy",
   queue.enqueue({ id: "n1", transcript: "first, edited", spans: [] });
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(updates.filter((update) => update.id === "n1").map((update) => update.status), ["queued", "ready", "queued", "ready"]);
+});
+
+test("Codex quick answers stream from one long-lived app server", async () => {
+  // Stands in for `codex app-server`: one JSON message per line, both ways.
+  const server = `
+    const send = (m) => process.stdout.write(JSON.stringify(m) + "\\n");
+    let threads = 0, turns = 0;
+    require("readline").createInterface({ input: process.stdin }).on("line", (line) => {
+      const m = JSON.parse(line);
+      if (m.method === "initialize") send({ id: m.id, result: {} });
+      if (m.method === "thread/start") send({ id: m.id, result: { thread: { id: "t" + (++threads) }, instructions: m.params.baseInstructions } });
+      if (m.method === "turn/start") {
+        turns += 1;
+        send({ id: m.id, result: {} });
+        send({ id: 900 + turns, method: "item/commandExecution/requestApproval", params: {} });
+        send({ method: "item/agentMessage/delta", params: { threadId: "other", delta: "ignored" } });
+        if (m.params.input[0].text.includes("explode")) return send({ method: "turn/completed", params: { threadId: m.params.threadId, turn: { status: "failed", error: { message: JSON.stringify({ error: { message: "model unavailable" } }) } } } });
+        for (const delta of ["pid " + process.pid, " turn ", String(turns)]) send({ method: "item/agentMessage/delta", params: { threadId: m.params.threadId, delta } });
+        send({ method: "turn/completed", params: { threadId: m.params.threadId, turn: { status: "completed" } } });
+      }
+    });`;
+  const answerer = new CodexQuickAnswerer(process.execPath, ["-e", server], process.cwd());
+  const ask = async (transcript: string) => {
+    const events: QuickEvent[] = [];
+    for await (const event of answerer.answer({ id: "n1", transcript, spans: [] })) events.push(event);
+    return events;
+  };
+  try {
+    const first = await ask("what is this?");
+    assert.deepEqual(first.map((event) => event.type), ["delta", "delta", "delta", "completed"]);
+    const second = await ask("and this?");
+    const pid = first.at(-1)!.text.split(" ")[1];
+    assert.equal(second.at(-1)!.text, `pid ${pid} turn 2`, "the same process answers the next note");
+    await assert.rejects(ask("explode"), /model unavailable/);
+    const recovered = await ask("still there?");
+    assert.match(recovered.at(-1)!.text, /turn 1$/, "a failure starts a fresh server");
+    assert.notEqual(recovered.at(-1)!.text.split(" ")[1], pid);
+  } finally { await answerer.dispose(); }
+  await assert.rejects(ask("after dispose"), /stopped/);
 });

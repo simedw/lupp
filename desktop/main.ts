@@ -144,6 +144,7 @@ async function loadRepository(repository: string, requestedBaseRef?: string) {
   diffSnapshots.clear();
   diffSnapshots.set(diff.diffSource, diff);
   activeSession = null;
+  ensureQuick();
   try {
     const watcher = await watchRepository(metadata.repository, (change) => {
       if (generation === watcherGeneration && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("repository:changed", change);
@@ -168,16 +169,24 @@ function resetQuick() {
   void previous?.answerer.dispose();
 }
 
-function quickAnswer(observation: ReviewObservation) {
-  const review = activeReview;
-  if (!review || quickSetting === "off" || !observation.transcript.trim()) return;
+// Called as soon as a repository is open, so the answerer is warm before the first note.
+function ensureQuick() {
+  if (!activeReview || quickSetting === "off") { resetQuick(); return null; }
   const provider = quickSetting === "same" ? queue.provider : quickSetting;
-  const repository = review.metadata.repository;
+  const repository = activeReview.metadata.repository;
   if (!quick || quick.provider !== provider || quick.repository !== repository) {
     resetQuick();
     quick = { answerer: adapters[provider].createQuickAnswerer(repository), provider, repository };
   }
-  const { answerer } = quick;
+  return quick;
+}
+
+function quickAnswer(observation: ReviewObservation) {
+  const review = activeReview;
+  if (!review || quickSetting === "off" || !observation.transcript.trim()) return;
+  const ready = ensureQuick();
+  if (!ready) return;
+  const { answerer, provider } = ready;
   const started = Date.now();
   const report = (status: "answering" | "done" | "failed", text: string, persist = false) => {
     if (activeReview !== review || !review.observations.includes(observation)) return;
@@ -261,7 +270,7 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => { app.quit(); });
-app.on("before-quit", () => { watcherGeneration++; repositoryWatcher?.close(); });
+app.on("before-quit", () => { watcherGeneration++; repositoryWatcher?.close(); resetQuick(); });
 
 ipcMain.handle("repository:choose", async () => {
   const result = await dialog.showOpenDialog(mainWindow!, {
@@ -341,6 +350,7 @@ ipcMain.handle("settings:save", async (_event, payload: SettingsInput) => {
   adapters = nextAdapters;
   quickSetting = config.quickAnswers || "same";
   resetQuick();
+  ensureQuick();
   await writeConfig(config);
   return {
     ...keySettings(safeStorage, config, Boolean(process.env.ANTHROPIC_API_KEY)),

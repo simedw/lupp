@@ -31,7 +31,7 @@ Check a file in the sidebar when you're happy with it. Checks are saved per bran
 
 Notes stay in `.lupp/` inside the reviewed repo; keep that folder out of Git. Recordings stay on your computer, but audio is sent to OpenAI for transcription, and the selected agent receives your notes and relevant code.
 
-Each note first gets a **quick answer**: a short reply from the code that was on screen, usually within a few seconds, while the full investigation searches the repository and has the final word. Choose who gives quick answers in **SET**. Claude streams its reply and is the fastest; Codex takes a little longer and arrives in one piece. A finished note's status line shows how long hearing, the quick answer and the investigation each took.
+Each note first gets a **quick answer**: a short reply from the code that was on screen, usually within a few seconds, while the full investigation searches the repository and has the final word. Choose who gives quick answers in **SET**. Both agents stay running between notes and stream the reply as they write it; expect two to three seconds, a little more for the first note. A finished note's status line shows how long hearing, the quick answer and the investigation each took.
 
 Investigated notes distinguish answers, recommended actions, and decisions still needed. Reply under any finding, typed or with **Speak**, to answer a decision or ask a follow-up; the agent investigates again and replaces the finding. **↻** investigates a note again after a failure, an interrupted session, or an edit to its transcript.
 

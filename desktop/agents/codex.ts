@@ -3,9 +3,6 @@ import {
   findingSchema,
   parseFinding,
   reviewPrompt,
-  quickPrompt,
-  quickSystemPrompt,
-  serialQueue,
   type ImplementingAdapter,
   type ImplementEvent,
   type QuickAnswerer,
@@ -14,6 +11,7 @@ import {
   type AgentSession,
   type ReviewObservation
 } from "./types.js";
+import { CodexQuickAnswerer } from "./codex-quick.js";
 
 type CodexAdapterOptions = { codexPath: string | null; codexError?: string | null };
 
@@ -50,41 +48,13 @@ export class CodexAdapter implements ImplementingAdapter {
 
   createQuickAnswerer(repository: string): QuickAnswerer {
     const { codexPath, codexError } = this.options;
-    const acquire = serialQueue();
-    let thread: Thread | null = null;
-    return {
-      // Codex reports a message only once it is complete, so this arrives in one piece.
-      async *answer(observation: ReviewObservation): AsyncIterable<QuickEvent> {
-        const release = await acquire();
-        try {
-          if (!codexPath) throw new Error(codexError || "Codex CLI not found. Install Codex or set REVIEW_VOICE_CODEX_PATH.");
-          if (!thread) {
-            const { Codex } = await import("@openai/codex-sdk");
-            thread = new Codex({ codexPathOverride: codexPath }).startThread({
-              workingDirectory: repository,
-              sandboxMode: "read-only",
-              approvalPolicy: "never",
-              networkAccessEnabled: false,
-              webSearchMode: "disabled",
-              modelReasoningEffort: "low"
-            });
-          }
-          const { events } = await thread.runStreamed(`${quickSystemPrompt}\n\n${quickPrompt(observation)}`);
-          let text = "";
-          for await (const event of events) {
-            if (event.type === "item.completed" && event.item.type === "agent_message") text = event.item.text;
-            if (event.type === "turn.failed") throw new Error(event.error.message || "Codex could not answer");
-            if (event.type === "error") throw new Error(event.message || "Codex could not answer");
-          }
-          if (!text) throw new Error("Codex returned no answer");
-          yield { type: "completed", text: text.trim() };
-        } catch (error) {
-          thread = null;
-          throw error;
-        } finally { release(); }
-      },
-      async dispose() { thread = null; }
-    };
+    if (!codexPath) {
+      const message = codexError || "Codex CLI not found. Install Codex or set REVIEW_VOICE_CODEX_PATH.";
+      return { async *answer(): AsyncIterable<QuickEvent> { throw new Error(message); }, async dispose() {} };
+    }
+    const answerer = new CodexQuickAnswerer(codexPath, ["app-server", "-c", 'web_search="disabled"'], repository);
+    answerer.warm();
+    return answerer;
   }
 
   async *implement(repository: string, brief: string): AsyncIterable<ImplementEvent> {
