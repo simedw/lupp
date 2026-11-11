@@ -1,5 +1,5 @@
 import type { AnalysisUpdate } from "./agent-queue.js";
-import type { ActionState, AgentAvailability, AgentProviderId, ReviewObservation } from "./agents/types.js";
+import type { ActionState, AgentAvailability, AgentProviderId, QuickAnswer, ReviewObservation } from "./agents/types.js";
 import type { ActionSelection } from "./actions.js";
 
 export type DiffLine = { type: "add" | "delete" | "context" | "meta"; oldLine: number | null; newLine: number | null; text: string };
@@ -21,9 +21,13 @@ export type Settings = {
   anthropicApiKeyConfigured: boolean;
   anthropicApiKeyError?: string | null;
   agentProvider: AgentProviderId;
+  quickAnswers: QuickSetting;
   availability: AgentAvailability[];
 };
-export type SettingsInput = { agentProvider: AgentProviderId; openaiApiKey: string; anthropicApiKey: string };
+// Who gives the fast first reply: the review agent, a named one, or nobody.
+export type QuickSetting = "same" | AgentProviderId | "off";
+export type QuickUpdate = { id: string; quick: QuickAnswer; timings?: ReviewObservation["timings"] };
+export type SettingsInput = { agentProvider: AgentProviderId; quickAnswers: QuickSetting; openaiApiKey: string; anthropicApiKey: string };
 export type ActionUpdate = { observationId: string; actionKey: string; state: ActionState };
 export type ReviewAPI = {
   chooseRepository(): Promise<Repository | null>;
@@ -44,6 +48,7 @@ export type ReviewAPI = {
   replyToFinding(payload: { id: string; text: string }): Promise<{ status: "queued"; provider: AgentProviderId; replies: NonNullable<ReviewObservation["replies"]> }>;
   applyAction(selection: ActionSelection): Promise<{ state: ActionState }>;
   onActionUpdate(callback: (update: ActionUpdate) => void): () => void;
+  onQuickUpdate(callback: (update: QuickUpdate) => void): () => void;
   dismissAction(selection: ActionSelection & { dismissed: boolean }): Promise<{ dismissedActionKeys: string[] }>;
   copyActions(selection?: ActionSelection): Promise<{ count: number }>;
   onRepositoryChange(callback: (change: RepositoryChange) => void): () => void;

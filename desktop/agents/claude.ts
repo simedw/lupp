@@ -1,11 +1,16 @@
-import type { SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { Query, SDKMessage, SDKResultMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { readFileSync } from "node:fs";
 import {
   findingSchema,
   parseFinding,
   reviewPrompt,
+  quickPrompt,
+  quickSystemPrompt,
+  serialQueue,
   type ImplementingAdapter,
   type ImplementEvent,
+  type QuickAnswerer,
+  type QuickEvent,
   type AgentEvent,
   type AgentSession,
   type AgentUsage,
@@ -34,6 +39,10 @@ export class ClaudeAdapter implements ImplementingAdapter {
 
   async createSession(repository: string): Promise<AgentSession> {
     return new ClaudeSession(repository, this.options.apiKey);
+  }
+
+  createQuickAnswerer(repository: string): QuickAnswerer {
+    return new ClaudeQuickAnswerer(repository, this.options.apiKey);
   }
 
   async *implement(repository: string, brief: string): AsyncIterable<ImplementEvent> {
@@ -134,4 +143,98 @@ class ClaudeSession implements AgentSession {
   }
 
   async dispose() {}
+}
+
+// A small model with no tools, kept running between notes: starting the agent
+// process is most of a cold answer's wait, so only the first note pays it.
+const QUICK_MODEL = "claude-haiku-5-5";
+const QUICK_TURNS_PER_SESSION = 25;
+
+class ClaudeQuickAnswerer implements QuickAnswerer {
+  private readonly acquire = serialQueue();
+  private stream: Query | null = null;
+  private messages: AsyncIterator<SDKMessage> | null = null;
+  private pending: SDKUserMessage[] = [];
+  private wake: (() => void) | null = null;
+  private turns = 0;
+  private disposed = false;
+
+  constructor(private readonly repository: string, private readonly apiKey?: string) {}
+
+  private async *input(stream: { closed: boolean }): AsyncGenerator<SDKUserMessage> {
+    while (!stream.closed) {
+      const next = this.pending.shift();
+      if (next) yield next;
+      else await new Promise<void>((resolve) => { this.wake = resolve; });
+    }
+  }
+
+  private state: { closed: boolean } | null = null;
+
+  private async open() {
+    if (this.messages) return;
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    this.state = { closed: false };
+    this.stream = query({
+      prompt: this.input(this.state),
+      options: {
+        cwd: this.repository,
+        env: agentEnv(this.apiKey),
+        model: QUICK_MODEL,
+        systemPrompt: quickSystemPrompt,
+        settingSources: [],
+        tools: [],
+        allowedTools: [],
+        permissionMode: "dontAsk",
+        includePartialMessages: true
+      }
+    });
+    this.messages = this.stream[Symbol.asyncIterator]();
+    this.turns = 0;
+  }
+
+  private close() {
+    if (this.state) this.state.closed = true;
+    this.wake?.();
+    this.stream?.close();
+    this.stream = null;
+    this.messages = null;
+    this.pending = [];
+  }
+
+  async *answer(observation: ReviewObservation): AsyncIterable<QuickEvent> {
+    const release = await this.acquire();
+    try {
+      if (this.disposed) throw new Error("Quick answers were stopped");
+      // Bound how much earlier code the conversation carries.
+      if (this.turns >= QUICK_TURNS_PER_SESSION) this.close();
+      await this.open();
+      this.turns += 1;
+      this.pending.push({ type: "user", message: { role: "user", content: quickPrompt(observation) }, parent_tool_use_id: null });
+      this.wake?.();
+      let text = "";
+      for (;;) {
+        const { value: message, done } = await this.messages!.next();
+        if (done) throw new Error("Claude stopped before answering");
+        if (message.type === "stream_event" && message.event.type === "content_block_delta" && message.event.delta.type === "text_delta") {
+          text += message.event.delta.text;
+          yield { type: "delta", text: message.event.delta.text };
+        }
+        if (message.type !== "result") continue;
+        if (message.subtype !== "success") throw new Error(message.errors.join("; ") || `Claude could not answer (${message.subtype})`);
+        if (message.is_error) throw new Error(message.result || "Claude could not answer");
+        yield { type: "completed", text: (message.result || text).trim() };
+        return;
+      }
+    } catch (error) {
+      // A broken stream cannot be trusted with the next note.
+      this.close();
+      throw error;
+    } finally { release(); }
+  }
+
+  async dispose() {
+    this.disposed = true;
+    this.close();
+  }
 }

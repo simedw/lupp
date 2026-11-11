@@ -203,6 +203,13 @@ button:disabled{cursor:not-allowed;opacity:.35}
 .note-form textarea{flex:1;min-width:0;resize:none;border:1px solid #a8a79e;border-radius:3px;padding:7px 8px;background:#fff;color:var(--ink);font:12px/1.4 var(--sans)}
 .note-form textarea:focus{outline:1px solid var(--ink)}
 .note-form button{border:1px solid var(--ink);border-radius:3px;padding:0 9px;background:var(--ink);color:var(--acid);font:8px var(--mono);white-space:nowrap}
+.quick-answer{padding:9px 11px 10px;border-top:1px solid var(--line);background:#f3f6e6;cursor:default}
+.quick-label{color:#55683a;font:600 7px var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.quick-answer p{margin:5px 0 0;font-size:12px;line-height:1.45;overflow-wrap:anywhere}
+.quick-answer code{border-radius:2px;padding:0 3px;background:#e2e8cf;font:11px var(--mono)}
+.quick-answer[data-status=answering] p:after{content:"▍";margin-left:2px;color:#7d9a3c;animation:pulse .8s infinite}
+.quick-answer[data-status=failed]{background:#f1ece6}
+.quick-answer[data-status=failed] .quick-label,.quick-answer[data-status=failed] p{color:#8a6f62}
 .usage-strip{display:flex;flex-wrap:wrap;gap:5px 10px;padding:7px 10px;border-top:1px solid var(--line);background:#d7d4c9;color:#62655c;font:7px var(--mono);letter-spacing:.03em}
 .usage-strip span:not(:last-child):after{content:"·";margin-left:10px;color:#999b92}
 .modal{position:fixed;z-index:50;inset:0;display:grid;place-items:center;background:rgba(15,17,12,.7);backdrop-filter:blur(8px)}

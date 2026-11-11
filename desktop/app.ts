@@ -71,6 +71,7 @@ const state: State = {
 type Controls = {
   "#mic": HTMLButtonElement;
   "#agent-provider": HTMLSelectElement;
+  "#quick-answers": HTMLSelectElement;
   "#api-key": HTMLInputElement;
   "#anthropic-api-key": HTMLInputElement;
   "#file-search": HTMLButtonElement;
@@ -605,14 +606,16 @@ async function processSegment(segment: SpeechSegment, attention: AttentionSample
   renderObservations();
   markAttention(spans);
   try {
+    const sent = performance.now();
     const result = await window.reviewAPI.saveAndTranscribe({ id, wavBase64: arrayBufferToBase64(wav) });
     if (result.status === "needs-key") throw new Error("Add an OpenAI API key in settings");
+    observation.timings = { transcribeMs: Math.round(performance.now() - sent) };
     observation.transcript = result.transcript;
     observation.audioPath = result.audioPath;
     observation.status = "queued";
     observation.detail = `Waiting for ${agentName()}`;
     renderObservations();
-    await window.reviewAPI.enqueueAnalysis({ id, transcript: observation.transcript, spans, durationMs: observation.durationMs, audioPath: observation.audioPath });
+    await window.reviewAPI.enqueueAnalysis({ id, transcript: observation.transcript, spans, durationMs: observation.durationMs, audioPath: observation.audioPath, timings: observation.timings });
   } catch (error) {
     observation.status = "failed";
     observation.detail = errorMessage(error);
@@ -689,6 +692,28 @@ function markAttention(spans: CodeLocation[]) {
 
 type CardResult = Pick<ReviewObservation, "finding" | "usage" | "dismissedActionKeys" | "status" | "replies" | "actionStates"> & { replyTarget: boolean };
 const cardResults = new WeakMap<HTMLElement, CardResult>();
+const seconds = (ms: number) => `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+// Once a note is answered, its status line shows where the wait went.
+function statusText(observation: ReviewObservation) {
+  const { transcribeMs, quickMs, investigateMs } = observation.timings || {};
+  const waits = [transcribeMs && `heard ${seconds(transcribeMs)}`, quickMs && `quick ${seconds(quickMs)}`, investigateMs && `investigated ${seconds(investigateMs)}`].filter(Boolean);
+  return `${observation.status} · ${observation.status === "ready" && waits.length ? waits.join(" · ") : observation.detail || ""}`;
+}
+function renderQuick(card: HTMLElement, observation: ReviewObservation) {
+  let box = card.querySelector<HTMLElement>(".quick-answer");
+  if (!observation.quick) { box?.remove(); return; }
+  if (!box) {
+    box = el("div", "quick-answer");
+    box.append(el("span", "quick-label"), el("p"));
+    card.insertBefore(box, card.querySelector(".finding, .usage-strip"));
+  }
+  const { status, text, provider } = observation.quick;
+  box.dataset.status = status;
+  box.title = "A fast reply from the code that was on screen. The investigation below searches the repository and has the final word.";
+  box.querySelector(".quick-label")!.textContent = status === "failed" ? "Quick answer unavailable" : `Quick answer · ${provider === "claude" ? "Claude" : "Codex"} · from the code on screen`;
+  // Models mark identifiers with backticks; show those as code, not punctuation.
+  box.querySelector("p")!.replaceChildren(...(text || (status === "answering" ? "Thinking…" : "")).split("`").map((part, index) => index % 2 ? el("code", "", part) : document.createTextNode(part)));
+}
 const inFlight = (observation: ReviewObservation) => ["transcribing", "queued", "investigating"].includes(observation.status || "");
 const updateObservationList = createObservationList<ReviewObservation, HTMLElement>($("#observation-list"), {
   createEmpty() {
@@ -712,7 +737,7 @@ const updateObservationList = createObservationList<ReviewObservation, HTMLEleme
     };
     const top = el("div", "observation-top");
     top.append(el("span", "observation-id", observation.id));
-    top.append(el("span", `observation-status ${observation.status}`, `${observation.status} · ${observation.detail || ""}`));
+    top.append(el("span", `observation-status ${observation.status}`, statusText(observation)));
     const remove = el("button", "observation-delete", "×");
     remove.title = "Delete local observation";
     remove.onclick = async () => {
@@ -752,7 +777,9 @@ const updateObservationList = createObservationList<ReviewObservation, HTMLEleme
     card.classList.toggle("selected", state.selectedObservation === observation.id);
     const status = card.querySelector<HTMLElement>(".observation-status")!;
     status.className = `observation-status ${observation.status}`;
-    status.textContent = `${observation.status} · ${observation.detail || ""}`;
+    status.textContent = statusText(observation);
+    status.title = status.textContent;
+    renderQuick(card, observation);
     const transcript = card.querySelector("textarea")!;
     transcript.placeholder = observation.status === "transcribing" ? "Transcribing…" : "No transcript";
     // Progress updates must not overwrite an in-progress transcript edit.
@@ -976,6 +1003,7 @@ $("#settings-form").onsubmit = async (event) => {
   try {
     const result = await window.reviewAPI.saveSettings({
       agentProvider: $("#agent-provider").value === "claude" ? "claude" : "codex",
+      quickAnswers: $("#quick-answers").value as Settings["quickAnswers"],
       openaiApiKey: $("#api-key").value,
       anthropicApiKey: $("#anthropic-api-key").value
     });
@@ -1052,6 +1080,15 @@ window.reviewAPI.onAnalysisUpdate((update) => {
   observation.provider = update.provider || observation.provider;
   if (update.finding) observation.finding = update.finding;
   if (update.usage) observation.usage = update.usage;
+  if (update.timings) observation.timings = update.timings;
+  renderObservations();
+});
+
+window.reviewAPI.onQuickUpdate((update) => {
+  const observation = state.observations.find((item) => item.id === update.id);
+  if (!observation) return;
+  observation.quick = update.quick;
+  if (update.timings) observation.timings = update.timings;
   renderObservations();
 });
 
@@ -1059,6 +1096,7 @@ function applySettings(settings: Settings) {
   state.apiKeyConfigured = settings.apiKeyConfigured;
   state.agentProvider = settings.agentProvider;
   $("#agent-provider").value = settings.agentProvider;
+  $("#quick-answers").value = settings.quickAnswers;
   const hasError = settings.apiKeyError || settings.anthropicApiKeyError;
   $("#key-status").className = `settings-status ${settings.apiKeyConfigured && !hasError ? "ok" : ""}`;
   const keyParts = [settings.apiKeyError || (settings.apiKeyConfigured ? "OpenAI transcription key configured." : "OpenAI transcription key missing.")];

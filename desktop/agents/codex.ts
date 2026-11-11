@@ -3,8 +3,13 @@ import {
   findingSchema,
   parseFinding,
   reviewPrompt,
+  quickPrompt,
+  quickSystemPrompt,
+  serialQueue,
   type ImplementingAdapter,
   type ImplementEvent,
+  type QuickAnswerer,
+  type QuickEvent,
   type AgentEvent,
   type AgentSession,
   type ReviewObservation
@@ -33,7 +38,6 @@ export class CodexAdapter implements ImplementingAdapter {
     }
     const { Codex } = await import("@openai/codex-sdk");
     const thread = new Codex({ codexPathOverride: this.options.codexPath }).startThread({
-      model: "gpt-6.1",
       workingDirectory: repository,
       sandboxMode: "read-only",
       approvalPolicy: "never",
@@ -41,7 +45,46 @@ export class CodexAdapter implements ImplementingAdapter {
       webSearchMode: "disabled",
       modelReasoningEffort: "low"
     });
-    return new CodexSession(thread, this.options.codexPath);
+    return new CodexSession(thread);
+  }
+
+  createQuickAnswerer(repository: string): QuickAnswerer {
+    const { codexPath, codexError } = this.options;
+    const acquire = serialQueue();
+    let thread: Thread | null = null;
+    return {
+      // Codex reports a message only once it is complete, so this arrives in one piece.
+      async *answer(observation: ReviewObservation): AsyncIterable<QuickEvent> {
+        const release = await acquire();
+        try {
+          if (!codexPath) throw new Error(codexError || "Codex CLI not found. Install Codex or set REVIEW_VOICE_CODEX_PATH.");
+          if (!thread) {
+            const { Codex } = await import("@openai/codex-sdk");
+            thread = new Codex({ codexPathOverride: codexPath }).startThread({
+              workingDirectory: repository,
+              sandboxMode: "read-only",
+              approvalPolicy: "never",
+              networkAccessEnabled: false,
+              webSearchMode: "disabled",
+              modelReasoningEffort: "low"
+            });
+          }
+          const { events } = await thread.runStreamed(`${quickSystemPrompt}\n\n${quickPrompt(observation)}`);
+          let text = "";
+          for await (const event of events) {
+            if (event.type === "item.completed" && event.item.type === "agent_message") text = event.item.text;
+            if (event.type === "turn.failed") throw new Error(event.error.message || "Codex could not answer");
+            if (event.type === "error") throw new Error(event.message || "Codex could not answer");
+          }
+          if (!text) throw new Error("Codex returned no answer");
+          yield { type: "completed", text: text.trim() };
+        } catch (error) {
+          thread = null;
+          throw error;
+        } finally { release(); }
+      },
+      async dispose() { thread = null; }
+    };
   }
 
   async *implement(repository: string, brief: string): AsyncIterable<ImplementEvent> {
@@ -52,7 +95,6 @@ export class CodexAdapter implements ImplementingAdapter {
     const { Codex } = await import("@openai/codex-sdk");
     // Writes are confined to the checkout; still no network or approvals.
     const thread = new Codex({ codexPathOverride: this.options.codexPath }).startThread({
-      model: "gpt-6.1",
       workingDirectory: repository,
       sandboxMode: "workspace-write",
       approvalPolicy: "never",
@@ -74,10 +116,10 @@ export class CodexAdapter implements ImplementingAdapter {
 }
 
 class CodexSession implements AgentSession {
-  constructor(private readonly thread: Thread, private readonly executable: string) {}
+  constructor(private readonly thread: Thread) {}
 
   async *analyze(observation: ReviewObservation): AsyncIterable<AgentEvent> {
-    yield { type: "progress", detail: `Starting Codex via ${this.executable}` };
+    yield { type: "progress", detail: "Starting Codex" };
     const { events } = await this.thread.runStreamed(reviewPrompt(observation), { outputSchema: findingSchema });
     let finalResponse = "";
     let usage = null;

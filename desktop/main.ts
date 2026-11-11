@@ -7,11 +7,11 @@ import { safeSegmentId } from "./lib.js";
 import { AgentReviewQueue, type AnalysisUpdate } from "./agent-queue.js";
 import { CodexAdapter } from "./agents/codex.js";
 import { ClaudeAdapter } from "./agents/claude.js";
-import type { ActionState, AgentProviderId, ImplementingAdapter, ReviewObservation } from "./agents/types.js";
+import type { ActionState, AgentProviderId, ImplementingAdapter, QuickAnswerer, ReviewObservation } from "./agents/types.js";
 import { resolveCodexExecutable } from "./codex-path.js";
 import { loadReview, saveReview } from "./review-store.js";
 import { keySettings, unlockSecret } from "./secrets.js";
-import type { DiffSnapshot, DiffSource, ReviewedFile, ReviewMetadata, SettingsInput } from "./types.js";
+import type { DiffSnapshot, DiffSource, QuickSetting, ReviewedFile, ReviewMetadata, SettingsInput } from "./types.js";
 import { updateReviewedFiles } from "./file-review.js";
 import { isDiffSource } from "./diff-source.js";
 import { collectActions, formatActionBrief, formatImplementBrief, recommendedActions, actionKey, setActionDismissed, type ActionSelection } from "./actions.js";
@@ -21,6 +21,7 @@ type Config = {
   apiKey?: string;
   anthropicApiKey?: string;
   agentProvider?: AgentProviderId;
+  quickAnswers?: QuickSetting;
 };
 
 type ActiveReview = { metadata: ReviewMetadata; observations: ReviewObservation[]; reviewedFiles: ReviewedFile[] };
@@ -99,6 +100,7 @@ async function createAdapters(config: Config): Promise<Record<AgentProviderId, I
       name: "Claude",
       async probe() { return { provider: "claude", name: "Claude", available: false, detail: secret.error! }; },
       async createSession() { throw new Error(secret.error!); },
+      createQuickAnswerer() { return { async *answer() { throw new Error(secret.error!); }, async dispose() {} }; },
       async *implement() { throw new Error(secret.error!); }
     } : new ClaudeAdapter({ apiKey: secret.value || undefined })
   };
@@ -127,10 +129,13 @@ async function loadRepository(repository: string, requestedBaseRef?: string) {
   const review = await loadReview(reviewMetadata);
   // Reopening the same checkout can select a different branch/review too.
   await queue.setRepository(metadata.repository, true);
+  resetQuick();
+  enqueuedAt.clear();
   const generation = ++watcherGeneration;
   repositoryWatcher?.close();
   // A fix that was running when the app closed never reported back.
   for (const observation of review.observations) {
+    if (observation.quick?.status === "answering") delete observation.quick;
     for (const state of Object.values(observation.actionStates || {})) {
       if (state.status === "applying") Object.assign(state, { status: "failed", detail: "Interrupted when Lupp closed. Check the diff before trying again." });
     }
@@ -149,9 +154,60 @@ async function loadRepository(repository: string, requestedBaseRef?: string) {
   return { ...metadata, baseRef, ...diff, review: { observations: review.observations, file: review.file, reviewedFiles: review.reviewedFiles }, source: undefined };
 }
 
+// Quick answers: a fast reply from the code on screen while the investigation
+// runs. Which agent gives them is a setting of its own, because the fastest
+// one is not necessarily the one you want investigating.
+let quickSetting: QuickSetting = "same";
+let quick: { answerer: QuickAnswerer; provider: AgentProviderId; repository: string } | null = null;
+const isQuickSetting = (value: unknown): value is QuickSetting => value === "same" || value === "claude" || value === "codex" || value === "off";
+const enqueuedAt = new Map<string, number>();
+
+function resetQuick() {
+  const previous = quick;
+  quick = null;
+  void previous?.answerer.dispose();
+}
+
+function quickAnswer(observation: ReviewObservation) {
+  const review = activeReview;
+  if (!review || quickSetting === "off" || !observation.transcript.trim()) return;
+  const provider = quickSetting === "same" ? queue.provider : quickSetting;
+  const repository = review.metadata.repository;
+  if (!quick || quick.provider !== provider || quick.repository !== repository) {
+    resetQuick();
+    quick = { answerer: adapters[provider].createQuickAnswerer(repository), provider, repository };
+  }
+  const { answerer } = quick;
+  const started = Date.now();
+  const report = (status: "answering" | "done" | "failed", text: string, persist = false) => {
+    if (activeReview !== review || !review.observations.includes(observation)) return;
+    observation.quick = { status, text, provider };
+    if (status === "done") observation.timings = { ...observation.timings, quickMs: Date.now() - started };
+    if (persist) persistActiveReview().catch((error) => console.error(`[review-store] ${error.message}`));
+    mainWindow?.webContents.send("quick:update", { id: observation.id, quick: observation.quick, timings: observation.timings });
+  };
+  report("answering", "");
+  void (async () => {
+    let text = "";
+    try {
+      for await (const event of answerer.answer(observation)) {
+        text = event.type === "delta" ? text + event.text : event.text;
+        report(event.type === "delta" ? "answering" : "done", text, event.type === "completed");
+      }
+    } catch (error) { report("failed", error instanceof Error ? error.message : String(error), true); }
+  })();
+}
+
 function handleAnalysisUpdate(update: AnalysisUpdate) {
   const observation = activeReview?.observations.find((item) => item.id === update.id);
   if (observation) {
+    if (update.status === "queued") enqueuedAt.set(update.id, Date.now());
+    if (update.status === "ready" && enqueuedAt.has(update.id)) {
+      // Includes time spent waiting behind other notes: that is what the reviewer feels.
+      observation.timings = { ...observation.timings, investigateMs: Date.now() - enqueuedAt.get(update.id)! };
+      enqueuedAt.delete(update.id);
+    }
+    update = { ...update, timings: observation.timings };
     observation.status = update.status;
     observation.detail = update.detail || "";
     observation.provider = update.provider;
@@ -168,6 +224,7 @@ async function createWindow() {
   const config = await readConfig();
   adapters = await createAdapters(config);
   const provider = config.agentProvider === "claude" ? "claude" : "codex";
+  if (isQuickSetting(config.quickAnswers)) quickSetting = config.quickAnswers;
   queue = new AgentReviewQueue(handleAnalysisUpdate, adapters[provider]);
 
   mainWindow = new BrowserWindow({
@@ -264,6 +321,7 @@ ipcMain.handle("settings:get", async () => {
   return {
     ...keySettings(safeStorage, config, Boolean(process.env.ANTHROPIC_API_KEY)),
     agentProvider: queue.provider,
+    quickAnswers: quickSetting,
     availability
   };
 });
@@ -276,14 +334,18 @@ ipcMain.handle("settings:save", async (_event, payload: SettingsInput) => {
   if (openaiApiKey) config.apiKey = encryptSecret(openaiApiKey);
   if (anthropicApiKey) config.anthropicApiKey = encryptSecret(anthropicApiKey);
   config.agentProvider = provider;
+  if (isQuickSetting(payload.quickAnswers)) config.quickAnswers = payload.quickAnswers;
 
   const nextAdapters = await createAdapters(config);
   await queue.setAdapter(nextAdapters[provider]);
   adapters = nextAdapters;
+  quickSetting = config.quickAnswers || "same";
+  resetQuick();
   await writeConfig(config);
   return {
     ...keySettings(safeStorage, config, Boolean(process.env.ANTHROPIC_API_KEY)),
     agentProvider: provider,
+    quickAnswers: quickSetting,
     availability: await Promise.all(Object.values(adapters).map((adapter) => adapter.probe()))
   };
 });
@@ -337,6 +399,7 @@ ipcMain.handle("analysis:enqueue", async (_event, observation: ReviewObservation
   else activeReview.observations[existing] = clean;
   await persistActiveReview();
   queue.enqueue(clean);
+  if (existing === -1) quickAnswer(clean);
   return { status: "queued", provider: queue.provider };
 });
 

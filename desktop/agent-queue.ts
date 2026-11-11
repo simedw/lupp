@@ -7,6 +7,7 @@ export type AnalysisUpdate = {
   finding?: Finding;
   usage?: AgentUsage | null;
   provider?: AgentProviderId;
+  timings?: ReviewObservation["timings"];
 };
 
 export class AgentReviewQueue {

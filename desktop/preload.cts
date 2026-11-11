@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
-import type { ActionUpdate, RepositoryChange, ReviewAPI } from "./types.js";
+import type { ActionUpdate, QuickUpdate, RepositoryChange, ReviewAPI } from "./types.js";
 import type { AnalysisUpdate } from "./agent-queue.js";
 
 const reviewAPI: ReviewAPI = {
@@ -25,6 +25,11 @@ const reviewAPI: ReviewAPI = {
   },
   dismissAction: (selection) => ipcRenderer.invoke("action:dismiss", selection),
   copyActions: (selection) => ipcRenderer.invoke("actions:copy", selection),
+  onQuickUpdate: (callback) => {
+    const listener = (_event: IpcRendererEvent, update: QuickUpdate) => callback(update);
+    ipcRenderer.on("quick:update", listener);
+    return () => ipcRenderer.removeListener("quick:update", listener);
+  },
   onRepositoryChange: (callback) => {
     const listener = (_event: IpcRendererEvent, change: RepositoryChange) => callback(change);
     ipcRenderer.on("repository:changed", listener);

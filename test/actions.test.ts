@@ -111,3 +111,19 @@ test("a reply sends the earlier conclusion and the reviewer's answer back for a 
   assert.match(replied, /- "Keep the fallback"\n- "Actually \\"remove\\" it"/);
   assert.match(replied, /replaces the previous one/);
 });
+
+test("quick answers see only the captured code and are told to admit its limits", async () => {
+  const { quickPrompt, serialQueue } = await import("../desktop/agents/types.js");
+  const prompt = quickPrompt(observation());
+  assert.match(prompt, /The reviewer said: "Private spoken context"/);
+  assert.match(prompt, /src\/router\.ts lines 42-61 \(staged diff/);
+  assert.match(prompt, /function unused\(\) \{\}/);
+  assert.match(prompt, /not enough to be sure/);
+  assert.match(quickPrompt({ id: "n9", transcript: "hm", spans: [] }), /no code was captured/);
+  // Notes are answered one at a time, in the order they were asked.
+  const acquire = serialQueue();
+  const order: string[] = [];
+  const run = async (name: string, ms: number) => { const release = await acquire(); await new Promise((resolve) => setTimeout(resolve, ms)); order.push(name); release(); };
+  await Promise.all([run("first", 30), run("second", 0), run("third", 10)]);
+  assert.deepEqual(order, ["first", "second", "third"]);
+});
