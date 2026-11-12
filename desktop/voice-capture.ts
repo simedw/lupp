@@ -1,4 +1,7 @@
 export const SPEECH_SILENCE_GRACE_MS = 2000;
+// Open-mic sounds shorter than a second are noise; a deliberate hold can be brief.
+const MIN_OPEN_MIC_MS = 1000;
+const MIN_HELD_MS = 400;
 
 export type SpeechSegment = { frames: Float32Array[]; sampleRate: number; durationMs: number; endedAt: number };
 type VoiceCallbacks = {
@@ -21,6 +24,7 @@ export class VoiceCapture {
   frames: Float32Array[];
   silenceMs: number;
   lastVoiceFrame: number;
+  held: boolean;
 
   constructor(callbacks: VoiceCallbacks) {
     this.callbacks = callbacks;
@@ -34,6 +38,7 @@ export class VoiceCapture {
     this.frames = [];
     this.silenceMs = 0;
     this.lastVoiceFrame = 0;
+    this.held = false;
   }
 
   async start() {
@@ -56,7 +61,8 @@ export class VoiceCapture {
     const rms = Math.sqrt(energy / frame.length);
     const frameMs = frame.length / this.context.sampleRate * 1000;
     const threshold = Math.max(0.012, this.noiseFloor * 3.2);
-    const voiced = !this.muted && rms > threshold;
+    // While held, everything is kept: the key decides the segment, not the level.
+    const voiced = this.held || (!this.muted && rms > threshold);
     this.callbacks.onLevel(Math.min(1, rms / Math.max(threshold * 2.5, .035)));
 
     if (!this.speaking) {
@@ -85,10 +91,45 @@ export class VoiceCapture {
     }
   }
 
-  finalize() {
+  // Push-to-talk: record from now until release(), even while muted and
+  // regardless of level. On an open mic it just pins the current segment open.
+  hold() {
+    if (!this.context || this.held) return;
+    this.held = true;
+    this.enableTracks(true);
+    if (this.speaking) return;
+    this.speaking = true;
+    // A muted microphone's pre-roll is only silence.
+    this.frames = this.muted ? [] : [...this.preRoll];
+    this.lastVoiceFrame = this.frames.length;
+    this.silenceMs = 0;
+    this.callbacks.onSpeechStart({ startedAt: this.callbacks.now() });
+  }
+
+  release() {
+    if (!this.held) return;
+    this.finalize(MIN_HELD_MS);
+    this.held = false;
+    this.enableTracks(!this.muted);
+  }
+
+  // Throw away the segment being recorded without creating a note.
+  cancel() {
+    if (!this.speaking) return;
+    this.frames = [];
+    this.finalize();
+    this.held = false;
+    this.enableTracks(!this.muted);
+  }
+
+  private enableTracks(enabled: boolean) {
+    for (const track of this.stream?.getAudioTracks() || []) track.enabled = enabled;
+  }
+
+  finalize(minimumMs = this.held ? MIN_HELD_MS : MIN_OPEN_MIC_MS) {
     if (!this.speaking || !this.context) return;
     const sampleRate = this.context.sampleRate;
-    const tailFrames = Math.ceil(.15 * this.context.sampleRate / this.frames[0].length);
+    const tailFrames = this.frames.length ? Math.ceil(.15 * this.context.sampleRate / this.frames[0].length) : 0;
     const frames = this.frames.slice(0, Math.min(this.frames.length, this.lastVoiceFrame + tailFrames));
     const durationMs = frames.reduce((sum, frame) => sum + frame.length / sampleRate * 1000, 0);
     this.speaking = false;
@@ -96,19 +137,20 @@ export class VoiceCapture {
     this.preRoll = [];
     this.lastVoiceFrame = 0;
     this.silenceMs = 0;
-    if (durationMs < 1000) this.callbacks.onDiscard(durationMs);
+    if (durationMs < minimumMs) this.callbacks.onDiscard(durationMs);
     else this.callbacks.onSpeechEnd({ frames, sampleRate: this.context.sampleRate, durationMs, endedAt: this.callbacks.now() });
   }
 
   setMuted(muted: boolean) {
-    if (muted && this.speaking) this.finalize();
+    if (muted && this.speaking && !this.held) this.finalize();
     this.muted = muted;
-    for (const track of this.stream?.getAudioTracks() || []) track.enabled = !muted;
+    this.enableTracks(!muted || this.held);
     this.callbacks.onLevel(0);
   }
 
   async stop() {
     if (this.speaking) this.finalize();
+    this.held = false;
     this.processor?.disconnect();
     this.stream?.getTracks().forEach((track) => track.stop());
     await this.context?.close();

@@ -46,3 +46,8 @@ export function revealFileAncestors(path: string, collapsed: Set<string>) {
   const parts = path.split("/");
   for (let i = 1; i < parts.length; i++) collapsed.delete(parts.slice(0, i).join("/"));
 }
+
+// Files in the order the tree shows them, whether or not their folders are open.
+export function treeFiles(nodes: readonly FileTreeNode[]): DiffFile[] {
+  return nodes.flatMap((node) => node.kind === "folder" ? treeFiles(node.children) : [node.file]);
+}

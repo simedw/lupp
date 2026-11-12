@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { errorMessage, hasErrorCode } from "../desktop/errors.js";
+import { luppRuntime } from "./runtime.js";
 
 const marker = "# Lupp local launcher — managed by install:local";
 const quote = (value: string) => `'${String(value).replaceAll("'", "'\\''")}'`;
@@ -83,7 +84,8 @@ async function main() {
   for (const name of ["lupp", "LUPP"]) await checkTarget(path.join(binDir, name));
 
   const require = createRequire(import.meta.url);
-  const electronPath = require("electron");
+  const installedElectron: string = require("electron");
+  const electronPath = process.env.ELECTRON_OVERRIDE_DIST_PATH ? installedElectron : await luppRuntime(installedElectron);
   const { version } = JSON.parse(await readFile(path.join(projectRoot, "package.json"), "utf8"));
   const installed = await installLaunchers({ binDir, projectRoot, electronPath, version });
   console.log(`\nInstalled ${installed.join(" and ")}.\nRun lupp, or LUPP, from any directory.`);

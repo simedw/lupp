@@ -1,25 +1,31 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, session } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session } from "electron";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { findInitialRepository, inspectRepository, loadRepositoryDiff } from "./git.js";
+import { findInitialRepository, inspectRepository, loadInitialDiff, loadRepositoryDiff } from "./git.js";
 import { safeSegmentId } from "./lib.js";
 import { AgentReviewQueue, type AnalysisUpdate } from "./agent-queue.js";
 import { CodexAdapter } from "./agents/codex.js";
 import { ClaudeAdapter } from "./agents/claude.js";
-import type { AgentAdapter, AgentProviderId, ReviewObservation } from "./agents/types.js";
+import type { ActionState, AgentProviderId, ImplementingAdapter, QuickAnswerer, ReviewObservation } from "./agents/types.js";
 import { resolveCodexExecutable } from "./codex-path.js";
 import { loadReview, saveReview } from "./review-store.js";
 import { keySettings, unlockSecret } from "./secrets.js";
-import type { ReviewMetadata, SettingsInput } from "./types.js";
+import type { DiffSnapshot, DiffSource, QuickSetting, ReviewedFile, ReviewMetadata, SettingsInput } from "./types.js";
+import { updateReviewedFiles } from "./file-review.js";
+import { isDiffSource } from "./diff-source.js";
+import { collectActions, formatActionBrief, formatImplementBrief, recommendedActions, actionKey, setActionDismissed, type ActionSelection } from "./actions.js";
+import { watchRepository } from "./repository-watcher.js";
 
 type Config = {
   apiKey?: string;
   anthropicApiKey?: string;
   agentProvider?: AgentProviderId;
+  quickAnswers?: QuickSetting;
 };
 
-type ActiveReview = { metadata: ReviewMetadata; observations: ReviewObservation[] };
+type ActiveReview = { metadata: ReviewMetadata; observations: ReviewObservation[]; reviewedFiles: ReviewedFile[] };
+const diffSnapshots = new Map<DiffSource, DiffSnapshot>();
 type ActiveSession = {
   id: string;
   root: string;
@@ -32,10 +38,16 @@ let mainWindow: BrowserWindow | null = null;
 let activeSession: ActiveSession | null = null;
 let activeReview: ActiveReview | null = null;
 let queue: AgentReviewQueue;
-let adapters: Record<AgentProviderId, AgentAdapter>;
+let adapters: Record<AgentProviderId, ImplementingAdapter>;
+// One agent edits the checkout at a time.
+let applying = Promise.resolve();
 let codexPath: string | null = null;
 let codexError: string | null = null;
 let reviewWrite = Promise.resolve();
+let repositoryWatcher: { close(): void } | undefined;
+let watcherGeneration = 0;
+// An explicit base (REVIEW_VOICE_BASE_REF) must survive reloading its checkout.
+let baseOverride: { repository: string; baseRef: string } | null = null;
 
 app.setName("Lupp");
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -77,7 +89,7 @@ async function getOpenAiApiKey() {
   return secret.value;
 }
 
-async function createAdapters(config: Config): Promise<Record<AgentProviderId, AgentAdapter>> {
+async function createAdapters(config: Config): Promise<Record<AgentProviderId, ImplementingAdapter>> {
   const secret = unlockSecret(safeStorage, config.anthropicApiKey, "Anthropic key");
   return {
     codex: new CodexAdapter({ codexPath, codexError }),
@@ -87,7 +99,9 @@ async function createAdapters(config: Config): Promise<Record<AgentProviderId, A
       id: "claude",
       name: "Claude",
       async probe() { return { provider: "claude", name: "Claude", available: false, detail: secret.error! }; },
-      async createSession() { throw new Error(secret.error!); }
+      async createSession() { throw new Error(secret.error!); },
+      createQuickAnswerer() { return { async *answer() { throw new Error(secret.error!); }, async dispose() {} }; },
+      async *implement() { throw new Error(secret.error!); }
     } : new ClaudeAdapter({ apiKey: secret.value || undefined })
   };
 }
@@ -97,7 +111,7 @@ function persistActiveReview() {
   const review = activeReview;
   const sessionSnapshot = activeSession;
   reviewWrite = reviewWrite.catch(() => {}).then(async () => {
-    await saveReview(review.metadata, review.observations);
+    await saveReview(review.metadata, review.observations, review.reviewedFiles);
     if (sessionSnapshot) {
       sessionSnapshot.observations = review.observations;
       await writeFile(path.join(sessionSnapshot.root, "session.json"), `${JSON.stringify(sessionSnapshot, null, 2)}\n`, { mode: 0o600 });
@@ -108,19 +122,101 @@ function persistActiveReview() {
 
 async function loadRepository(repository: string, requestedBaseRef?: string) {
   const metadata = await inspectRepository(repository);
+  if (requestedBaseRef) baseOverride = { repository: metadata.repository, baseRef: requestedBaseRef };
   const baseRef = requestedBaseRef || metadata.baseRef;
-  const diff = await loadRepositoryDiff(metadata.repository, baseRef);
+  const diff = await loadInitialDiff(metadata.repository, baseRef);
   const reviewMetadata = { ...metadata, baseRef };
   const review = await loadReview(reviewMetadata);
-  activeReview = { metadata: reviewMetadata, observations: review.observations };
+  // Reopening the same checkout can select a different branch/review too.
+  await queue.setRepository(metadata.repository, true);
+  resetQuick();
+  enqueuedAt.clear();
+  const generation = ++watcherGeneration;
+  repositoryWatcher?.close();
+  // A fix that was running when the app closed never reported back.
+  for (const observation of review.observations) {
+    if (observation.quick?.status === "answering") delete observation.quick;
+    for (const state of Object.values(observation.actionStates || {})) {
+      if (state.status === "applying") Object.assign(state, { status: "failed", detail: "Interrupted when Lupp closed. Check the diff before trying again." });
+    }
+  }
+  activeReview = { metadata: reviewMetadata, observations: review.observations, reviewedFiles: review.reviewedFiles };
+  diffSnapshots.clear();
+  diffSnapshots.set(diff.diffSource, diff);
   activeSession = null;
-  await queue.setRepository(metadata.repository);
-  return { ...metadata, baseRef, ...diff, review: { observations: review.observations, file: review.file }, source: undefined };
+  ensureQuick();
+  try {
+    const watcher = await watchRepository(metadata.repository, (change) => {
+      if (generation === watcherGeneration && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("repository:changed", change);
+    });
+    if (generation === watcherGeneration) repositoryWatcher = watcher;
+    else watcher.close();
+  } catch (error) { console.error("[repository-watch]", error); }
+  return { ...metadata, baseRef, ...diff, review: { observations: review.observations, file: review.file, reviewedFiles: review.reviewedFiles }, source: undefined };
+}
+
+// Quick answers: a fast reply from the code on screen while the investigation
+// runs. Which agent gives them is a setting of its own, because the fastest
+// one is not necessarily the one you want investigating.
+let quickSetting: QuickSetting = "same";
+let quick: { answerer: QuickAnswerer; provider: AgentProviderId; repository: string } | null = null;
+const isQuickSetting = (value: unknown): value is QuickSetting => value === "same" || value === "claude" || value === "codex" || value === "off";
+const enqueuedAt = new Map<string, number>();
+
+function resetQuick() {
+  const previous = quick;
+  quick = null;
+  void previous?.answerer.dispose();
+}
+
+// Called as soon as a repository is open, so the answerer is warm before the first note.
+function ensureQuick() {
+  if (!activeReview || quickSetting === "off") { resetQuick(); return null; }
+  const provider = quickSetting === "same" ? queue.provider : quickSetting;
+  const repository = activeReview.metadata.repository;
+  if (!quick || quick.provider !== provider || quick.repository !== repository) {
+    resetQuick();
+    quick = { answerer: adapters[provider].createQuickAnswerer(repository), provider, repository };
+  }
+  return quick;
+}
+
+function quickAnswer(observation: ReviewObservation) {
+  const review = activeReview;
+  if (!review || quickSetting === "off" || !observation.transcript.trim()) return;
+  const ready = ensureQuick();
+  if (!ready) return;
+  const { answerer, provider } = ready;
+  const started = Date.now();
+  const report = (status: "answering" | "done" | "failed", text: string, persist = false) => {
+    if (activeReview !== review || !review.observations.includes(observation)) return;
+    observation.quick = { status, text, provider };
+    if (status === "done") observation.timings = { ...observation.timings, quickMs: Date.now() - started };
+    if (persist) persistActiveReview().catch((error) => console.error(`[review-store] ${error.message}`));
+    mainWindow?.webContents.send("quick:update", { id: observation.id, quick: observation.quick, timings: observation.timings });
+  };
+  report("answering", "");
+  void (async () => {
+    let text = "";
+    try {
+      for await (const event of answerer.answer(observation)) {
+        text = event.type === "delta" ? text + event.text : event.text;
+        report(event.type === "delta" ? "answering" : "done", text, event.type === "completed");
+      }
+    } catch (error) { report("failed", error instanceof Error ? error.message : String(error), true); }
+  })();
 }
 
 function handleAnalysisUpdate(update: AnalysisUpdate) {
   const observation = activeReview?.observations.find((item) => item.id === update.id);
   if (observation) {
+    if (update.status === "queued") enqueuedAt.set(update.id, Date.now());
+    if (update.status === "ready" && enqueuedAt.has(update.id)) {
+      // Includes time spent waiting behind other notes: that is what the reviewer feels.
+      observation.timings = { ...observation.timings, investigateMs: Date.now() - enqueuedAt.get(update.id)! };
+      enqueuedAt.delete(update.id);
+    }
+    update = { ...update, timings: observation.timings };
     observation.status = update.status;
     observation.detail = update.detail || "";
     observation.provider = update.provider;
@@ -137,9 +233,12 @@ async function createWindow() {
   const config = await readConfig();
   adapters = await createAdapters(config);
   const provider = config.agentProvider === "claude" ? "claude" : "codex";
+  if (isQuickSetting(config.quickAnswers)) quickSetting = config.quickAnswers;
   queue = new AgentReviewQueue(handleAnalysisUpdate, adapters[provider]);
 
   mainWindow = new BrowserWindow({
+    title: "Lupp",
+    icon: desktopAsset("assets/lupp-icon.png"),
     width: 1520,
     height: 980,
     minWidth: 1080,
@@ -160,6 +259,8 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  // BrowserWindow's icon is used on Linux; macOS needs its Dock icon set explicitly.
+  app.dock?.setIcon(desktopAsset("assets/lupp-icon.png"));
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
     const trusted = contents.getURL().startsWith("file:");
     callback(trusted && permission === "media");
@@ -168,7 +269,8 @@ app.whenReady().then(async () => {
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
 });
 
-app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
+app.on("window-all-closed", () => { app.quit(); });
+app.on("before-quit", () => { watcherGeneration++; repositoryWatcher?.close(); resetQuick(); });
 
 ipcMain.handle("repository:choose", async () => {
   const result = await dialog.showOpenDialog(mainWindow!, {
@@ -185,12 +287,50 @@ ipcMain.handle("repository:initial", async () => {
   return loadRepository(repository, process.env.REVIEW_VOICE_BASE_REF);
 });
 
+ipcMain.handle("repository:diff", async (_event, source: unknown) => {
+  if (!activeReview) throw new Error("Open a repository first");
+  if (!isDiffSource(source)) throw new Error("Unknown change source");
+  const metadata = activeReview.metadata;
+  const current = await inspectRepository(metadata.repository);
+  if (current.branch !== metadata.branch) return { branchChanged: true, branch: current.branch };
+  const { source: _raw, ...diff } = await loadRepositoryDiff(metadata.repository, metadata.baseRef, source);
+  if (diff.headSha !== metadata.headSha || diff.baseSha !== metadata.baseSha) {
+    // A commit, amend or rebase on the same branch: the review carries on
+    // against the new HEAD, and every other cached view is now stale.
+    activeReview.metadata = { ...metadata, headSha: diff.headSha, baseSha: diff.baseSha };
+    if (activeSession) activeSession.metadata = activeReview.metadata;
+    diffSnapshots.clear();
+  }
+  diffSnapshots.set(source, diff);
+  return diff;
+});
+
+ipcMain.handle("repository:reload", async () => {
+  if (!activeReview) throw new Error("Open a repository first");
+  const repository = activeReview.metadata.repository;
+  return loadRepository(repository, baseOverride?.repository === repository ? baseOverride.baseRef : undefined);
+});
+
+ipcMain.handle("file:reviewed", async (_event, payload: ReviewedFile & { reviewed: boolean }) => {
+  if (!activeReview) throw new Error("Open a repository first");
+  if (!payload || !isDiffSource(payload.source) || typeof payload.path !== "string" || typeof payload.reviewId !== "string" || typeof payload.reviewed !== "boolean") throw new Error("Invalid file review");
+  const file = diffSnapshots.get(payload.source)?.files.find((file) => file.path === payload.path);
+  if (!file || file.reviewId !== payload.reviewId) throw new Error("The displayed file changed. Refresh this view before checking it.");
+  const review = activeReview;
+  const previous = review.reviewedFiles;
+  review.reviewedFiles = updateReviewedFiles(previous, payload, payload.reviewed);
+  try { await persistActiveReview(); }
+  catch (error) { review.reviewedFiles = previous; throw error; }
+  return { reviewedFiles: review.reviewedFiles };
+});
+
 ipcMain.handle("settings:get", async () => {
   const config = await readConfig();
   const availability = await Promise.all(Object.values(adapters).map((adapter) => adapter.probe()));
   return {
     ...keySettings(safeStorage, config, Boolean(process.env.ANTHROPIC_API_KEY)),
     agentProvider: queue.provider,
+    quickAnswers: quickSetting,
     availability
   };
 });
@@ -203,14 +343,19 @@ ipcMain.handle("settings:save", async (_event, payload: SettingsInput) => {
   if (openaiApiKey) config.apiKey = encryptSecret(openaiApiKey);
   if (anthropicApiKey) config.anthropicApiKey = encryptSecret(anthropicApiKey);
   config.agentProvider = provider;
+  if (isQuickSetting(payload.quickAnswers)) config.quickAnswers = payload.quickAnswers;
 
   const nextAdapters = await createAdapters(config);
   await queue.setAdapter(nextAdapters[provider]);
   adapters = nextAdapters;
+  quickSetting = config.quickAnswers || "same";
+  resetQuick();
+  ensureQuick();
   await writeConfig(config);
   return {
     ...keySettings(safeStorage, config, Boolean(process.env.ANTHROPIC_API_KEY)),
     agentProvider: provider,
+    quickAnswers: quickSetting,
     availability: await Promise.all(Object.values(adapters).map((adapter) => adapter.probe()))
   };
 });
@@ -222,7 +367,7 @@ ipcMain.handle("session:start", async (_event, metadata: ReviewMetadata) => {
   await mkdir(path.join(root, "audio"), { recursive: true });
   if (!activeReview || activeReview.metadata.repository !== metadata.repository || activeReview.metadata.branch !== metadata.branch) {
     const review = await loadReview(metadata);
-    activeReview = { metadata, observations: review.observations };
+    activeReview = { metadata, observations: review.observations, reviewedFiles: review.reviewedFiles };
   }
   activeSession = { id, root, metadata, observations: activeReview.observations, startedAt: new Date().toISOString() };
   await writeFile(path.join(root, "session.json"), `${JSON.stringify(activeSession, null, 2)}\n`, { mode: 0o600 });
@@ -231,7 +376,7 @@ ipcMain.handle("session:start", async (_event, metadata: ReviewMetadata) => {
 });
 
 ipcMain.handle("segment:transcribe", async (_event, payload: { id: string; wavBase64: string }) => {
-  if (!activeSession) throw new Error("Start a review session first");
+  if (!activeSession) throw new Error("The microphone is not open yet");
   const id = safeSegmentId(payload.id);
   const audio = Buffer.from(payload.wavBase64, "base64");
   if (!audio.length || audio.length > 25 * 1024 * 1024) throw new Error("Invalid or oversized audio segment");
@@ -255,14 +400,16 @@ ipcMain.handle("segment:transcribe", async (_event, payload: { id: string; wavBa
   return { status: "transcribed", transcript: String(result.text || "").trim(), audioPath };
 });
 
+// Typed notes need no microphone session, only an open repository.
 ipcMain.handle("analysis:enqueue", async (_event, observation: ReviewObservation) => {
-  if (!activeSession || !activeReview) throw new Error("Start a review session first");
+  if (!activeReview) throw new Error("Open a repository first");
   const clean = { ...observation, id: safeSegmentId(observation.id), provider: queue.provider };
   const existing = activeReview.observations.findIndex((item) => item.id === clean.id);
   if (existing === -1) activeReview.observations.push(clean);
   else activeReview.observations[existing] = clean;
   await persistActiveReview();
   queue.enqueue(clean);
+  if (existing === -1) quickAnswer(clean);
   return { status: "queued", provider: queue.provider };
 });
 
@@ -281,6 +428,91 @@ ipcMain.handle("observation:delete", async (_event, idValue: string) => {
   const id = safeSegmentId(idValue);
   activeReview.observations = activeReview.observations.filter((item) => item.id !== id);
   if (activeSession) activeSession.observations = activeReview.observations;
+  queue.cancel(id);
   await persistActiveReview();
   return { status: "deleted" };
+});
+
+function findObservation(idValue: unknown) {
+  if (!activeReview) throw new Error("Open a repository first");
+  const id = safeSegmentId(idValue);
+  const observation = activeReview.observations.find((item) => item.id === id);
+  if (!observation) throw new Error("This note no longer exists");
+  return observation;
+}
+
+// Investigate a saved note again: after a failure, an interrupted session, an
+// edited transcript, or a reply to its finding.
+async function investigateAgain(observation: ReviewObservation) {
+  if (queue.has(observation.id)) throw new Error("This note is already being investigated");
+  if (!observation.transcript.trim()) throw new Error("Write what you want investigated first");
+  observation.provider = queue.provider;
+  await persistActiveReview();
+  queue.enqueue(observation);
+  return { status: "queued" as const, provider: queue.provider };
+}
+
+ipcMain.handle("analysis:rerun", async (_event, id: string) => investigateAgain(findObservation(id)));
+
+ipcMain.handle("analysis:reply", async (_event, payload: { id: string; text: string }) => {
+  const observation = findObservation(payload?.id);
+  const text = String(payload?.text || "").trim();
+  if (!text) throw new Error("Write a reply first");
+  if (!observation.finding) throw new Error("There is no finding to reply to yet");
+  if (queue.has(observation.id)) throw new Error("This note is already being investigated");
+  observation.replies = [...(observation.replies || []), { text, at: new Date().toISOString() }];
+  return { ...await investigateAgain(observation), replies: observation.replies };
+});
+
+ipcMain.handle("action:apply", async (_event, selection: ActionSelection) => {
+  if (!selection || typeof selection.actionKey !== "string") throw new Error("Invalid action selection");
+  const observation = findObservation(selection.observationId);
+  const review = activeReview!;
+  const key = selection.actionKey;
+  if (!recommendedActions(observation).some((action) => actionKey(action) === key)) throw new Error("This action is no longer available");
+  if (observation.actionStates?.[key]?.status === "applying") throw new Error("This action is already being applied");
+  const adapter = adapters[queue.provider];
+  const brief = formatImplementBrief(review.metadata, review.observations, { observationId: observation.id, actionKey: key });
+  const report = (state: ActionState, persist = true) => {
+    observation.actionStates = { ...observation.actionStates, [key]: state };
+    // The checkout may have moved to another branch's review while this ran.
+    if (activeReview !== review) return;
+    if (persist) persistActiveReview().catch((error) => console.error(`[review-store] ${error.message}`));
+    mainWindow?.webContents.send("action:update", { observationId: observation.id, actionKey: key, state });
+  };
+  report({ status: "applying", detail: "Waiting for the agent" });
+  applying = applying.then(async () => {
+    try {
+      let summary = "";
+      for await (const event of adapter.implement(review.metadata.repository, brief)) {
+        if (event.type === "progress") report({ status: "applying", detail: event.detail }, false);
+        else summary = event.summary;
+      }
+      report({ status: "applied", detail: summary.trim().slice(0, 1200) || `${adapter.name} finished.` });
+    } catch (error) {
+      report({ status: "failed", detail: error instanceof Error ? error.message : String(error) });
+    }
+  });
+  return { state: observation.actionStates![key] };
+});
+
+ipcMain.handle("action:dismiss", async (_event, payload: ActionSelection & { dismissed: boolean }) => {
+  if (!activeReview) throw new Error("Open a repository first");
+  if (!payload || typeof payload.actionKey !== "string" || typeof payload.dismissed !== "boolean") throw new Error("Invalid action selection");
+  const id = safeSegmentId(payload.observationId);
+  const observation = activeReview.observations.find((item) => item.id === id);
+  if (!observation) throw new Error("Observation no longer exists");
+  const previous = observation.dismissedActionKeys;
+  setActionDismissed(observation, payload.actionKey, payload.dismissed);
+  try { await persistActiveReview(); }
+  catch (error) { observation.dismissedActionKeys = previous; throw error; }
+  return { dismissedActionKeys: observation.dismissedActionKeys || [] };
+});
+
+ipcMain.handle("actions:copy", (_event, selection?: ActionSelection) => {
+  if (!activeReview) throw new Error("Open a repository first");
+  if (selection !== undefined && (!selection || typeof selection.actionKey !== "string" || !selection.observationId)) throw new Error("Invalid action selection");
+  const brief = formatActionBrief(activeReview.metadata, activeReview.observations, selection);
+  clipboard.writeText(brief);
+  return { count: selection ? 1 : collectActions(activeReview.observations).length };
 });

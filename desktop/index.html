@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; media-src 'self' blob: file:; img-src 'self' data:; connect-src 'none'">
   <title>Lupp</title>
+  <link rel="icon" type="image/png" href="assets/lupp-icon.png">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -20,31 +21,35 @@
       </div>
       <div class="transport">
         <button id="settings" class="icon-button" title="Agent and transcription settings">SET</button>
-        <button id="mute" class="mute-button" disabled><span class="mic-glyph">●</span><span>MUTED</span></button>
-        <button id="review-toggle" class="review-button" disabled><span class="review-pulse"></span><span>Start review</span></button>
+        <button id="mic" class="mic-button" data-mode="off" aria-pressed="false" disabled><span class="mic-glyph"></span><span class="mic-label">Hold to talk</span><kbd>V</kbd></button>
       </div>
     </header>
 
     <section id="empty-state" class="empty-state">
       <div class="empty-number">01</div>
-      <div><span class="eyebrow">LOCAL REVIEW SESSION</span><h1>Read code.<br>Think out loud.</h1><p>Open a checked-out branch. The desk freezes its diff, listens during an explicit review session, and binds each spoken segment to the code that held your attention.</p><button id="empty-open">Choose repository <span>↗</span></button></div>
+      <div><span class="eyebrow">LOCAL REVIEW SESSION</span><h1>Read code.<br>Think out loud.</h1><p>Open a checked-out branch. Hold V and say what you think. Lupp ties each thing you say to the code you were looking at and has an agent look into it.</p><button id="empty-open">Choose repository <span>↗</span></button></div>
       <div class="empty-diagram"><span>voice</span><i></i><span>attention</span><i></i><span>evidence</span></div>
     </section>
 
     <section id="workspace" class="workspace hidden">
       <nav class="file-rail">
         <header><span>CHANGED FILES</span><b id="file-count">0</b></header>
+        <div class="diff-filter"><label for="diff-source">SHOW CHANGES</label><select id="diff-source"><option value="branch">Branch · committed</option><option value="local">Local · all uncommitted</option><option value="staged">Staged · uncommitted</option><option value="unstaged">Unstaged · uncommitted</option><option value="untracked">Untracked · new files</option></select><button id="diff-refresh" type="button" title="Read this view again from disk. Saved observations stay unchanged.">↻ Refresh snapshot</button></div>
         <button id="file-search" class="file-search-trigger" disabled><span>Find file or code</span><kbd>⌘ K</kbd></button>
+        <div id="file-review-count" class="file-review-count" role="status" aria-live="polite" title="Check files you're happy with. Space toggles a focused file; Enter opens it. Checks apply to this change view and diff snapshot.">0 / 0 reviewed</div>
         <div id="file-list" class="file-list"></div>
       </nav>
       <section class="proof-stage">
+        <div id="diff-provenance" class="diff-provenance" data-source="branch" role="status"><b id="diff-source-label">Branch · committed</b><span id="diff-comparison">Merge base → HEAD</span><span id="diff-captured"></span><button id="live-update" type="button">Watching local edits</button></div>
         <header class="file-heading"><div><span id="file-status">MODIFIED</span><h2 id="file-name">—</h2></div><div class="file-tally"><ins id="file-additions">+0</ins><del id="file-deletions">−0</del></div></header>
         <div id="diff-scroll" class="diff-scroll" tabindex="-1"><div id="diff" class="diff"></div></div>
-        <footer class="attention-strip"><span class="live-dot"></span><b id="attention-label">Session idle</b><div id="level-meter" class="level-meter"><i></i></div><span id="attention-location">No active line</span></footer>
+        <footer class="attention-strip"><span class="live-dot"></span><b id="attention-label">Session idle</b><div id="level-meter" class="level-meter"><i></i></div><span class="key-hints" title="Keyboard shortcuts, available when you aren't typing"><kbd>Esc</kbd> discard <kbd>N</kbd> type a note <kbd>J</kbd><kbd>K</kbd> next / previous file</span><span id="attention-location">No active line</span></footer>
       </section>
       <aside class="voice-ledger">
         <header><div><span class="eyebrow">VOICE LEDGER</span><h2>Observations</h2></div><b id="observation-count">0</b></header>
+        <div class="action-toolbar"><span id="action-count" role="status" aria-live="polite">0 actions</span><button id="copy-actions" type="button" disabled title="Copy all non-dismissed recommended actions in this review, across all change views">Copy all actions ↗</button></div>
         <div id="observation-list" class="observation-list"><div class="ledger-empty"><span>◌</span><p>Spoken segments will collect here while you review.</p></div></div>
+        <form id="note-form" class="note-form"><textarea id="note-input" rows="2" placeholder="Type a note about the code on screen…" aria-label="Type a note"></textarea><button type="submit" title="Add this note and investigate it (Enter)">Add note ↵</button></form>
       </aside>
     </section>
   </main>
@@ -65,6 +70,7 @@
       <p>Choose the coding agent that investigates observations. Keys are encrypted with the operating system’s secure storage and never exposed to the renderer.</p>
       <label>Review agent<select id="agent-provider"><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
       <div class="provider-status" id="provider-status">Checking agents…</div>
+      <label>Quick answers<select id="quick-answers"><option value="same">Same agent as the review</option><option value="claude">Claude</option><option value="codex">Codex</option><option value="off">Off · investigations only</option></select></label>
       <label>OpenAI key · transcription<input id="api-key" type="password" autocomplete="off" placeholder="Leave blank to keep the saved key"></label>
       <label>Anthropic key · optional<input id="anthropic-api-key" type="password" autocomplete="off" placeholder="Uses existing Claude auth when blank"></label>
       <div class="settings-status" id="key-status">Checking…</div>

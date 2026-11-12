@@ -12,6 +12,7 @@ dist/
 *.webm
 *.mp3
 *.log
+*.swp
 coverage/
 release/
 *.zip
